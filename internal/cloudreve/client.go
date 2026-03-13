@@ -1,0 +1,567 @@
+// Copyright (C) 2026 The Syncthing Authors.
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this file,
+// You can obtain one at https://mozilla.org/MPL/2.0/.
+
+package cloudreve
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/textproto"
+	"net/url"
+	"path"
+	"strconv"
+	"strings"
+)
+
+var ErrUnsupportedUploadTarget = errors.New("cloudreve returned an unsupported upload target")
+
+type Client struct {
+	baseURL    string
+	token      string
+	httpClient *http.Client
+}
+
+type StoragePolicy struct {
+	Type string `json:"type"`
+}
+
+type uploadSession struct {
+	SessionID      string         `json:"session_id"`
+	UploadID       string         `json:"upload_id"`
+	ChunkSize      int64          `json:"chunk_size"`
+	Expires        int64          `json:"expires"`
+	UploadURLs     []string       `json:"upload_urls"`
+	Credential     string         `json:"credential"`
+	AccessKey      string         `json:"ak"`
+	KeyTime        string         `json:"keyTime"`
+	CompleteURL    string         `json:"completeURL"`
+	StoragePolicy  *StoragePolicy `json:"storage_policy"`
+	URI            string         `json:"uri"`
+	CallbackSecret string         `json:"callback_secret"`
+	MimeType       string         `json:"mime_type"`
+	UploadPolicy   string         `json:"upload_policy"`
+}
+
+type apiResponse[T any] struct {
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+	Data T      `json:"data"`
+}
+
+type createUploadSessionRequest struct {
+	URI          string `json:"uri"`
+	Size         int64  `json:"size"`
+	LastModified int64  `json:"last_modified,omitempty"`
+	MimeType     string `json:"mime_type,omitempty"`
+}
+
+type createFileRequest struct {
+	URI           string `json:"uri"`
+	Type          string `json:"type"`
+	ErrOnConflict bool   `json:"err_on_conflict"`
+}
+
+type qiniuChunkResponse struct {
+	ETag string `json:"etag"`
+}
+
+type qiniuCompleteRequest struct {
+	MimeType string          `json:"mimeType,omitempty"`
+	Parts    []qiniuPartInfo `json:"parts"`
+}
+
+type qiniuPartInfo struct {
+	ETag       string `json:"etag"`
+	PartNumber int    `json:"partNumber"`
+}
+
+type completeMultipartUpload struct {
+	XMLName xml.Name              `xml:"CompleteMultipartUpload"`
+	Parts   []completePartElement `xml:"Part"`
+}
+
+type completePartElement struct {
+	PartNumber int    `xml:"PartNumber"`
+	ETag       string `xml:"ETag"`
+}
+
+func NewClient(server, token string, httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	return &Client{
+		baseURL:    strings.TrimRight(server, "/"),
+		token:      token,
+		httpClient: httpClient,
+	}
+}
+
+func (c *Client) EnsureFolder(ctx context.Context, uri string) error {
+	if uri == "" || uri == "cloudreve://" {
+		return nil
+	}
+	return c.sendJSON(ctx, http.MethodPost, "/api/v4/file/create", createFileRequest{
+		URI:           uri,
+		Type:          "folder",
+		ErrOnConflict: false,
+	}, nil)
+}
+
+func (c *Client) UploadFile(ctx context.Context, uri string, size int64, lastModified int64, mimeType string, src io.Reader, progress func(done, total int64)) error {
+	session, err := c.createUploadSession(ctx, uri, size, lastModified, mimeType)
+	if err != nil {
+		return err
+	}
+
+	chunks, err := splitChunks(src, size, session.ChunkSize)
+	if err != nil {
+		return err
+	}
+
+	switch session.policyType() {
+	case "local":
+		return c.uploadLocalChunks(ctx, session, chunks, size, progress)
+	case "remote":
+		return c.uploadRemoteChunks(ctx, session, chunks, size, progress)
+	case "s3":
+		return c.uploadS3Like(ctx, session, chunks, size, progress, false, nil, true)
+	case "cos":
+		return c.uploadS3Like(ctx, session, chunks, size, progress, false, map[string]string{"x-cos-forbid-overwrite": "true"}, true)
+	case "ks3":
+		return c.uploadS3Like(ctx, session, chunks, size, progress, false, nil, true)
+	case "oss":
+		return c.uploadS3Like(ctx, session, chunks, size, progress, true, map[string]string{
+			"x-oss-forbid-overwrite": "true",
+			"x-oss-complete-all":     "yes",
+		}, false)
+	case "obs":
+		return c.uploadOBS(ctx, session, chunks, size, progress)
+	case "qiniu":
+		return c.uploadQiniu(ctx, session, chunks, size, progress)
+	case "upyun":
+		return c.uploadUpyun(ctx, session, chunks, size, progress)
+	case "onedrive":
+		return c.uploadOneDrive(ctx, session, chunks, size, progress)
+	default:
+		return fmt.Errorf("%w: %q", ErrUnsupportedUploadTarget, session.policyType())
+	}
+}
+
+func (c *Client) createUploadSession(ctx context.Context, uri string, size int64, lastModified int64, mimeType string) (uploadSession, error) {
+	req := createUploadSessionRequest{
+		URI:          uri,
+		Size:         size,
+		LastModified: lastModified,
+		MimeType:     mimeType,
+	}
+	var resp uploadSession
+	if err := c.sendJSON(ctx, http.MethodPut, "/api/v4/file/upload", req, &resp); err != nil {
+		return uploadSession{}, err
+	}
+	if resp.SessionID == "" {
+		return uploadSession{}, errors.New("cloudreve did not return a session id")
+	}
+	return resp, nil
+}
+
+func (c *Client) uploadLocalChunks(ctx context.Context, session uploadSession, chunks [][]byte, total int64, progress func(done, total int64)) error {
+	var uploaded int64
+	for idx, chunk := range chunks {
+		if err := c.uploadRequest(ctx, http.MethodPost, c.baseURL+"/api/v4/file/upload/"+session.SessionID+"/"+strconv.Itoa(idx), bytes.NewReader(chunk), requestOptions{
+			headers: map[string]string{
+				"Authorization": "Bearer " + c.token,
+				"Content-Type":  "application/octet-stream",
+			},
+			expectAPIResponse: true,
+		}); err != nil {
+			return err
+		}
+		uploaded += int64(len(chunk))
+		reportProgress(progress, uploaded, total)
+	}
+	return nil
+}
+
+func (c *Client) uploadRemoteChunks(ctx context.Context, session uploadSession, chunks [][]byte, total int64, progress func(done, total int64)) error {
+	if len(session.UploadURLs) == 0 {
+		return ErrUnsupportedUploadTarget
+	}
+	var uploaded int64
+	for idx, chunk := range chunks {
+		target, err := addQuery(session.UploadURLs[0], "chunk", strconv.Itoa(idx))
+		if err != nil {
+			return err
+		}
+		if err := c.uploadRequest(ctx, http.MethodPost, target, bytes.NewReader(chunk), requestOptions{
+			headers: map[string]string{
+				"Authorization": session.Credential,
+				"Content-Type":  "application/octet-stream",
+			},
+		}); err != nil {
+			return err
+		}
+		uploaded += int64(len(chunk))
+		reportProgress(progress, uploaded, total)
+	}
+	return nil
+}
+
+func (c *Client) uploadS3Like(ctx context.Context, session uploadSession, chunks [][]byte, total int64, progress func(done, total int64), isOSS bool, finishHeaders map[string]string, callback bool) error {
+	if len(session.UploadURLs) < len(chunks) || session.CompleteURL == "" {
+		return ErrUnsupportedUploadTarget
+	}
+	parts := make([]completePartElement, 0, len(chunks))
+	var uploaded int64
+	for idx, chunk := range chunks {
+		etag, err := c.uploadRawChunk(ctx, session.UploadURLs[idx], bytes.NewReader(chunk), nil)
+		if err != nil {
+			return err
+		}
+		if !isOSS {
+			parts = append(parts, completePartElement{PartNumber: idx + 1, ETag: etag})
+		}
+		uploaded += int64(len(chunk))
+		reportProgress(progress, uploaded, total)
+	}
+
+	var body []byte
+	if !isOSS {
+		payload, err := xml.Marshal(completeMultipartUpload{Parts: parts})
+		if err != nil {
+			return err
+		}
+		body = payload
+	}
+	if _, err := c.uploadRawChunkWithResponse(ctx, session.CompleteURL, http.MethodPost, bytes.NewReader(body), requestOptions{
+		headers: finishHeaders,
+	}); err != nil {
+		return err
+	}
+
+	if callback {
+		return c.sendAPIRequest(ctx, http.MethodGet, c.baseURL+"/api/v4/callback/"+session.policyType()+"/"+session.SessionID+"/"+session.CallbackSecret, nil, nil)
+	}
+	return nil
+}
+
+func (c *Client) uploadOBS(ctx context.Context, session uploadSession, chunks [][]byte, total int64, progress func(done, total int64)) error {
+	if len(session.UploadURLs) < len(chunks) || session.CompleteURL == "" {
+		return ErrUnsupportedUploadTarget
+	}
+	parts := make([]completePartElement, 0, len(chunks))
+	var uploaded int64
+	for idx, chunk := range chunks {
+		etag, err := c.uploadRawChunk(ctx, session.UploadURLs[idx], bytes.NewReader(chunk), nil)
+		if err != nil {
+			return err
+		}
+		parts = append(parts, completePartElement{PartNumber: idx + 1, ETag: etag})
+		uploaded += int64(len(chunk))
+		reportProgress(progress, uploaded, total)
+	}
+	payload, err := xml.Marshal(completeMultipartUpload{Parts: parts})
+	if err != nil {
+		return err
+	}
+	_, err = c.uploadRawChunkWithResponse(ctx, session.CompleteURL, http.MethodPost, bytes.NewReader(payload), requestOptions{})
+	return err
+}
+
+func (c *Client) uploadQiniu(ctx context.Context, session uploadSession, chunks [][]byte, total int64, progress func(done, total int64)) error {
+	if len(session.UploadURLs) == 0 {
+		return ErrUnsupportedUploadTarget
+	}
+	parts := make([]qiniuPartInfo, 0, len(chunks))
+	var uploaded int64
+	for idx, chunk := range chunks {
+		target := strings.TrimRight(session.UploadURLs[0], "/") + "/" + strconv.Itoa(idx+1)
+		body, err := c.uploadRawChunkWithResponse(ctx, target, http.MethodPut, bytes.NewReader(chunk), requestOptions{
+			headers: map[string]string{
+				"Authorization": "UpToken " + session.Credential,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		var resp qiniuChunkResponse
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return err
+		}
+		parts = append(parts, qiniuPartInfo{ETag: resp.ETag, PartNumber: idx + 1})
+		uploaded += int64(len(chunk))
+		reportProgress(progress, uploaded, total)
+	}
+
+	payload, err := json.Marshal(qiniuCompleteRequest{
+		MimeType: session.MimeType,
+		Parts:    parts,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = c.uploadRawChunkWithResponse(ctx, session.UploadURLs[0], http.MethodPost, bytes.NewReader(payload), requestOptions{
+		headers: map[string]string{
+			"Authorization": "UpToken " + session.Credential,
+			"Content-Type":  "application/json",
+		},
+	})
+	return err
+}
+
+func (c *Client) uploadUpyun(ctx context.Context, session uploadSession, chunks [][]byte, total int64, progress func(done, total int64)) error {
+	if len(session.UploadURLs) == 0 || len(chunks) != 1 {
+		return ErrUnsupportedUploadTarget
+	}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("policy", session.UploadPolicy); err != nil {
+		return err
+	}
+	if err := writer.WriteField("authorization", session.Credential); err != nil {
+		return err
+	}
+	if session.MimeType != "" {
+		if err := writer.WriteField("content-type", session.MimeType); err != nil {
+			return err
+		}
+	}
+	header := textproto.MIMEHeader{}
+	header.Set("Content-Disposition", `form-data; name="file"; filename="upload"`)
+	if session.MimeType != "" {
+		header.Set("Content-Type", session.MimeType)
+	} else {
+		header.Set("Content-Type", "application/octet-stream")
+	}
+	part, err := writer.CreatePart(header)
+	if err != nil {
+		return err
+	}
+	if _, err := part.Write(chunks[0]); err != nil {
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+	if _, err := c.uploadRawChunkWithResponse(ctx, session.UploadURLs[0], http.MethodPost, bytes.NewReader(body.Bytes()), requestOptions{
+		headers: map[string]string{
+			"Content-Type": writer.FormDataContentType(),
+		},
+	}); err != nil {
+		return err
+	}
+	reportProgress(progress, int64(len(chunks[0])), total)
+	return nil
+}
+
+func (c *Client) uploadOneDrive(ctx context.Context, session uploadSession, chunks [][]byte, total int64, progress func(done, total int64)) error {
+	if len(session.UploadURLs) == 0 {
+		return ErrUnsupportedUploadTarget
+	}
+	if total == 0 {
+		return fmt.Errorf("%w: %q", ErrUnsupportedUploadTarget, "onedrive empty file")
+	}
+	var uploaded int64
+	for _, chunk := range chunks {
+		start := uploaded
+		end := uploaded + int64(len(chunk)) - 1
+		if _, err := c.uploadRawChunkWithResponse(ctx, session.UploadURLs[0], http.MethodPut, bytes.NewReader(chunk), requestOptions{
+			headers: map[string]string{
+				"Content-Range": fmt.Sprintf("bytes %d-%d/%d", start, end, total),
+			},
+		}); err != nil {
+			return err
+		}
+		uploaded += int64(len(chunk))
+		reportProgress(progress, uploaded, total)
+	}
+	return c.sendAPIRequest(ctx, http.MethodPost, c.baseURL+"/api/v4/callback/onedrive/"+session.SessionID+"/"+session.CallbackSecret, nil, nil)
+}
+
+type requestOptions struct {
+	headers           map[string]string
+	expectAPIResponse bool
+}
+
+func (c *Client) sendJSON(ctx context.Context, method, endpoint string, reqBody, respBody any) error {
+	var body io.Reader
+	if reqBody != nil {
+		payload, err := json.Marshal(reqBody)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(payload)
+	}
+	return c.sendAPIRequest(ctx, method, c.baseURL+endpoint, body, respBody)
+}
+
+func (c *Client) sendAPIRequest(ctx context.Context, method, target string, body io.Reader, respBody any) error {
+	req, err := http.NewRequestWithContext(ctx, method, target, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		respText, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("cloudreve request failed: %s: %s", resp.Status, strings.TrimSpace(string(respText)))
+	}
+
+	var envelope apiResponse[json.RawMessage]
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return err
+	}
+	if envelope.Code != 0 {
+		return fmt.Errorf("cloudreve api error %d: %s", envelope.Code, envelope.Msg)
+	}
+	if respBody == nil || len(envelope.Data) == 0 || string(envelope.Data) == "null" {
+		return nil
+	}
+	return json.Unmarshal(envelope.Data, respBody)
+}
+
+func (c *Client) uploadRequest(ctx context.Context, method, target string, body io.Reader, opts requestOptions) error {
+	_, err := c.uploadRawChunkWithResponse(ctx, target, method, body, opts)
+	return err
+}
+
+func (c *Client) uploadRawChunk(ctx context.Context, target string, body io.Reader, headers map[string]string) (string, error) {
+	resp, err := c.uploadRawChunkWithResponse(ctx, target, http.MethodPut, body, requestOptions{headers: headers})
+	if err != nil {
+		return "", err
+	}
+	return string(resp), nil
+}
+
+func (c *Client) uploadRawChunkWithResponse(ctx context.Context, target, method string, body io.Reader, opts requestOptions) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, target, body)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := opts.headers["Content-Type"]; !ok && body != nil {
+		req.Header.Set("Content-Type", "application/octet-stream")
+	}
+	for key, value := range opts.headers {
+		req.Header.Set(key, value)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("cloudreve upload failed: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	if opts.expectAPIResponse {
+		var envelope apiResponse[json.RawMessage]
+		if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+			return nil, err
+		}
+		if envelope.Code != 0 {
+			return nil, fmt.Errorf("cloudreve api error %d: %s", envelope.Code, envelope.Msg)
+		}
+		return envelope.Data, nil
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if etag := resp.Header.Get("ETag"); etag != "" {
+		return []byte(etag), nil
+	}
+	return data, nil
+}
+
+func splitChunks(src io.Reader, total, chunkSize int64) ([][]byte, error) {
+	if total < 0 {
+		return nil, fmt.Errorf("invalid size %d", total)
+	}
+	if chunkSize <= 0 || chunkSize > total {
+		chunkSize = total
+	}
+	if total == 0 {
+		return [][]byte{{}}, nil
+	}
+	if chunkSize <= 0 {
+		chunkSize = total
+	}
+	if chunkSize > int64(^uint(0)>>1) {
+		return nil, fmt.Errorf("cloudreve chunk size too large: %d", chunkSize)
+	}
+
+	buf := make([]byte, int(chunkSize))
+	chunks := make([][]byte, 0, int((total+chunkSize-1)/chunkSize))
+	for {
+		n, readErr := io.ReadFull(src, buf)
+		if readErr != nil && !errors.Is(readErr, io.EOF) && !errors.Is(readErr, io.ErrUnexpectedEOF) {
+			return nil, readErr
+		}
+		if n > 0 {
+			chunk := make([]byte, n)
+			copy(chunk, buf[:n])
+			chunks = append(chunks, chunk)
+		}
+		if errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
+			break
+		}
+	}
+	return chunks, nil
+}
+
+func addQuery(rawURL, key, value string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set(key, value)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+func reportProgress(progress func(done, total int64), done, total int64) {
+	if progress != nil {
+		progress(done, total)
+	}
+}
+
+func (s uploadSession) policyType() string {
+	if s.StoragePolicy == nil {
+		return ""
+	}
+	return s.StoragePolicy.Type
+}
+
+func JoinURI(baseURI, relPath string) string {
+	baseURI = strings.TrimSpace(baseURI)
+	if baseURI == "" {
+		baseURI = "cloudreve://"
+	}
+	if relPath == "" || relPath == "." {
+		return strings.TrimRight(baseURI, "/")
+	}
+	trimmedRel := path.Clean(strings.ReplaceAll(relPath, "\\", "/"))
+	if trimmedRel == "." {
+		return strings.TrimRight(baseURI, "/")
+	}
+	return strings.TrimRight(baseURI, "/") + "/" + strings.TrimPrefix(trimmedRel, "/")
+}

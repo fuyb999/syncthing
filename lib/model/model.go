@@ -144,6 +144,7 @@ type model struct {
 
 	// constant or concurrency safe fields
 	progressEmitter *ProgressEmitter
+	cloudUploader   *cloudreveUploader
 	shortID         protocol.ShortID
 	// globalRequestLimiter limits the amount of data in concurrent incoming
 	// requests
@@ -253,6 +254,7 @@ func NewModel(cfg config.Wrapper, id protocol.DeviceID, sdb db.DB, protectedFile
 		remoteFolderStates:             make(map[protocol.DeviceID]map[string]remoteFolderState),
 		indexHandlers:                  newServiceMap[protocol.DeviceID, *indexHandlerRegistry](evLogger),
 	}
+	m.cloudUploader = newCloudreveUploader(m)
 	for devID, cfg := range cfg.Devices() {
 		m.deviceStatRefs[devID] = stats.NewDeviceStatisticsReference(db.NewTyped(sdb, "devicestats/"+devID.String()))
 		m.setConnRequestLimitersLocked(cfg)
@@ -260,6 +262,7 @@ func NewModel(cfg config.Wrapper, id protocol.DeviceID, sdb db.DB, protectedFile
 	m.Add(m.folderRunners)
 	m.Add(m.progressEmitter)
 	m.Add(m.indexHandlers)
+	m.Add(m.cloudUploader)
 	m.Add(svcutil.AsService(m.serve, m.String()))
 
 	return m
@@ -426,7 +429,7 @@ func (m *model) addAndStartFolderLockedWithIgnores(cfg config.FolderConfiguratio
 }
 
 func (m *model) warnAboutOverwritingProtectedFiles(cfg config.FolderConfiguration, ignores *ignore.Matcher) {
-	if cfg.Type == config.FolderTypeSendOnly {
+	if cfg.Type == config.FolderTypeSendOnly || cfg.Type == config.FolderTypeUploadOnly {
 		return
 	}
 
@@ -2681,11 +2684,29 @@ func (m *model) FolderErrors(folder string) ([]FileError, error) {
 	m.mut.RLock()
 	err := m.checkFolderRunningRLocked(folder)
 	runner, _ := m.folderRunners.Get(folder)
+	fcfg, haveCfg := m.folderCfgs[folder]
 	m.mut.RUnlock()
 	if err != nil {
 		return nil, err
 	}
+	if haveCfg && fcfg.Type == config.FolderTypeUploadOnly {
+		return m.cloudUploader.Errors(folder), nil
+	}
 	return runner.Errors(), nil
+}
+
+func (m *model) CloudreveSummary(folder string) cloudreveUploadSummary {
+	if m.cloudUploader == nil {
+		return cloudreveUploadSummary{}
+	}
+	return m.cloudUploader.Summary(folder)
+}
+
+func (m *model) CloudreveUploadStatus(folder string, page, perpage int) CloudreveUploadStatus {
+	if m.cloudUploader == nil {
+		return CloudreveUploadStatus{Page: page, Perpage: perpage, Items: []CloudreveUploadItem{}}
+	}
+	return m.cloudUploader.UploadStatus(folder, page, perpage)
 }
 
 func (m *model) WatchError(folder string) error {

@@ -284,6 +284,7 @@ func (cfg *Configuration) prepare(myID protocol.DeviceID) error {
 
 	guiPWIsSet := cfg.GUI.User != "" && cfg.GUI.Password != ""
 	cfg.Options.prepare(guiPWIsSet)
+	cfg.migrateLegacyCloudreve()
 
 	cfg.prepareIgnoredDevices(existingDevices)
 
@@ -297,6 +298,27 @@ func (cfg *Configuration) prepare(myID protocol.DeviceID) error {
 	cfg.applyMigrations()
 
 	return nil
+}
+
+func (cfg *Configuration) migrateLegacyCloudreve() {
+	if cfg.Options.Cloudreve.HasCredentials() {
+		return
+	}
+
+	if cfg.Defaults.Folder.Cloudreve.HasCredentials() {
+		cfg.Options.Cloudreve = cfg.Defaults.Folder.Cloudreve.Copy()
+		cfg.Options.Cloudreve.prepare()
+		return
+	}
+
+	for _, folder := range cfg.Folders {
+		if !folder.Cloudreve.HasCredentials() {
+			continue
+		}
+		cfg.Options.Cloudreve = folder.Cloudreve.Copy()
+		cfg.Options.Cloudreve.prepare()
+		return
+	}
 }
 
 func (cfg *Configuration) ensureMyDevice(myID protocol.DeviceID) {

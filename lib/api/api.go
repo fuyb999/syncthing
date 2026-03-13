@@ -203,7 +203,7 @@ func (s *service) getListener(guiCfg config.GUIConfiguration) (net.Listener, err
 }
 
 func sendJSON(w http.ResponseWriter, jsonObject interface{}) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	// Marshalling might fail, in which case we should return a 500 with the
 	// actual error.
 	bs, err := json.MarshalIndent(jsonObject, "", "  ")
@@ -263,6 +263,7 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodGet, "/rest/folder/versions", s.getFolderVersions)         // folder
 	restMux.HandlerFunc(http.MethodGet, "/rest/folder/errors", s.getFolderErrors)             // folder [perpage] [page]
 	restMux.HandlerFunc(http.MethodGet, "/rest/folder/pullerrors", s.getFolderErrors)         // folder (deprecated)
+	restMux.HandlerFunc(http.MethodGet, "/rest/folder/uploadstatus", s.getFolderUploadStatus) // folder [perpage] [page]
 	restMux.HandlerFunc(http.MethodGet, "/rest/events", s.getIndexEvents)                     // [since] [limit] [timeout] [events]
 	restMux.HandlerFunc(http.MethodGet, "/rest/events/disk", s.getDiskEvents)                 // [since] [limit] [timeout]
 	restMux.HandlerFunc(http.MethodGet, "/rest/noauth/health", s.getHealth)                   // -
@@ -1644,6 +1645,26 @@ func (s *service) getFolderErrors(w http.ResponseWriter, r *http.Request) {
 		"page":    page,
 		"perpage": perpage,
 	})
+}
+
+func (s *service) getFolderUploadStatus(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+	folder := qs.Get("folder")
+	page, perpage := getPagingParams(qs)
+
+	provider, ok := s.model.(interface {
+		CloudreveUploadStatus(string, int, int) model.CloudreveUploadStatus
+	})
+	if !ok {
+		sendJSON(w, model.CloudreveUploadStatus{
+			Page:    page,
+			Perpage: perpage,
+			Items:   []model.CloudreveUploadItem{},
+		})
+		return
+	}
+
+	sendJSON(w, provider.CloudreveUploadStatus(folder, page, perpage))
 }
 
 func (*service) getSystemBrowse(w http.ResponseWriter, r *http.Request) {

@@ -1,0 +1,25 @@
+<modal id="uploadStatus" status="info" icon="fas fa-cloud-upload-alt" heading="{{'Upload Queue' | translate}}" large="yes" closeable="yes">
+  <div class="modal-body">
+    <p translate>The following items are queued for upload or currently uploading to Cloudreve.</p>
+    <table class="table table-striped table-dynamic">
+      <tr dir-paginate="e in uploads.items | itemsPerPage: uploads.perpage" current-page="uploads.page" total-items="uploads.total" pagination-id="uploadStatus">
+        <td>{{e.path}}</td>
+        <td class="text-nowrap">{{e.status === 'uploading' ? ('Uploading' | translate) : e.status === 'rescan-pending' ? ('Waiting for Rescan' | translate) : ('Queued' | translate)}}</td>
+        <td class="text-right" ng-if="e.bytesTotal > 0">{{(100 * e.bytesDone / e.bytesTotal) | percent}}</td>
+        <td class="text-right" ng-if="e.bytesTotal <= 0">-</td>
+      </tr>
+    </table>
+    <dir-pagination-controls on-page-change="refreshUploadStatus(newPageNumber, uploads.perpage)" pagination-id="uploadStatus"></dir-pagination-controls>
+    <ul class="pagination pull-right">
+      <li ng-repeat="option in [10, 25, 50]" ng-class="{ active: uploads.perpage == option }">
+        <a href="#" ng-click="refreshUploadStatus(uploads.page, option)">{{option}}</a>
+      </li>
+    </ul>
+    <div class="clearfix"></div>
+  </div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-default btn-sm" data-dismiss="modal">
+      <span class="fas fa-times"></span>&nbsp;<span translate>Close</span>
+    </button>
+  </div>
+</modal>

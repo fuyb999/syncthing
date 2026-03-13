@@ -11,8 +11,6 @@ angular.module('syncthing.core')
         var navigatingAway = false;
         var online = false;
         var restarting = false;
-        var restartExpectedFrom = 0;
-        var restartExpectedUntil = 0;
 
         function initController() {
             LocaleService.autoConfigLocale();
@@ -33,34 +31,6 @@ angular.module('syncthing.core')
 
             setInterval($scope.refresh, 10000);
             Events.start();
-        }
-
-        function clearRestartExpectation() {
-            restartExpectedFrom = 0;
-            restartExpectedUntil = 0;
-        }
-
-        function setRestartExpectation(delayS) {
-            var delay = delayS > 0 ? delayS : 60;
-            var delayMs = delay * 1000;
-            var earlyMs = 5 * 1000;
-            var graceMs = 60 * 1000;
-            var now = Date.now();
-
-            restartExpectedFrom = now + Math.max(0, delayMs - earlyMs);
-            restartExpectedUntil = now + delayMs + graceMs;
-        }
-
-        function restartExpectedNow() {
-            if (!restartExpectedUntil) {
-                return false;
-            }
-            var now = Date.now();
-            if (now > restartExpectedUntil) {
-                clearRestartExpectation();
-                return false;
-            }
-            return now >= restartExpectedFrom;
         }
 
         // public/scope definitions
@@ -98,6 +68,7 @@ angular.module('syncthing.core')
         $scope.needed = {};
         $scope.neededFolder = '';
         $scope.failed = {};
+        $scope.uploads = {};
         $scope.localChanged = {};
         $scope.scanProgress = {};
         $scope.themes = [];
@@ -234,7 +205,6 @@ angular.module('syncthing.core')
 
                 online = true;
                 restarting = false;
-                clearRestartExpectation();
                 hideModal('#networkError');
                 hideModal('#restarting');
                 hideModal('#shutdown');
@@ -249,24 +219,8 @@ angular.module('syncthing.core')
             console.log('UIOffline');
             online = false;
             if (!restarting) {
-                if (restartExpectedNow()) {
-                    restarting = true;
-                    showModal('#restarting');
-                } else {
-                    showModal('#networkError');
-                }
+                showModal('#networkError');
             }
-        });
-
-        $scope.$on(Events.UPGRADE_RESTART_SCHEDULED, function (_event, arg) {
-            var delayS = 0;
-            if (arg && arg.data && arg.data.delayS !== undefined) {
-                delayS = parseInt(arg.data.delayS, 10);
-                if (isNaN(delayS) || delayS < 0) {
-                    delayS = 0;
-                }
-            }
-            setRestartExpectation(delayS);
         });
 
         $scope.$on('HTTPError', function (event, arg) {
@@ -485,6 +439,9 @@ angular.module('syncthing.core')
                 }
             }
             $scope.progress = progress;
+            if ($scope.uploads && $scope.uploads.folder) {
+                $scope.refreshUploadStatus($scope.uploads.page || 1, $scope.uploads.perpage || 10);
+            }
             console.log("DownloadProgress", $scope.progress);
         });
 
@@ -937,6 +894,18 @@ angular.module('syncthing.core')
             }).error($scope.emitHTTPError);
         };
 
+        $scope.refreshUploadStatus = function (page, perpage) {
+            if (!$scope.uploads || !$scope.uploads.folder) {
+                return;
+            }
+            var url = urlbase + '/folder/uploadstatus?folder=' + encodeURIComponent($scope.uploads.folder);
+            url += "&page=" + page + "&perpage=" + perpage;
+            $http.get(url).success(function (data) {
+                data.folder = $scope.uploads.folder;
+                $scope.uploads = data;
+            }).error($scope.emitHTTPError);
+        };
+
         $scope.refreshRemoteNeed = function (folder, page, perpage) {
             if (!$scope.remoteNeedDevice) {
                 return;
@@ -1039,6 +1008,15 @@ angular.module('syncthing.core')
                 return state;
             }
 
+            if (folderCfg.type === 'uploadonly') {
+                if (folderInfo.uploadingItems > 0) {
+                    return 'syncing';
+                }
+                if (folderInfo.uploadTotalItems > 0) {
+                    return 'sync-waiting';
+                }
+            }
+
             if (folderInfo.needTotalItems > 0) {
                 return 'outofsync';
             }
@@ -1050,6 +1028,9 @@ angular.module('syncthing.core')
                     return 'localadditions';
                 }
                 return 'localunencrypted';
+            }
+            if (folderCfg.type === 'uploadonly') {
+                return state;
             }
             if (folderCfg.devices.length <= 1) {
                 return 'unshared';
@@ -1086,6 +1067,12 @@ angular.module('syncthing.core')
         $scope.syncPercentage = function (folder) {
             if (typeof $scope.model[folder] === 'undefined') {
                 return 100;
+            }
+            if ($scope.folders[folder] && $scope.folders[folder].type === 'uploadonly') {
+                if ($scope.model[folder].uploadTotalBytes === 0) {
+                    return 100;
+                }
+                return progressIntegerPercentage($scope.model[folder].uploadDoneBytes, $scope.model[folder].uploadTotalBytes);
             }
             if ($scope.model[folder].needTotalItems === 0) {
                 return 100;
@@ -1317,8 +1304,14 @@ angular.module('syncthing.core')
                 case 'sync-preparing':
                     return $translate.instant('Preparing to Sync');
                 case 'sync-waiting':
+                    if (folder.type === 'uploadonly') {
+                        return $translate.instant('Waiting to Upload');
+                    }
                     return $translate.instant('Waiting to Sync');
                 case 'syncing':
+                    if (folder.type === 'uploadonly') {
+                        return $translate.instant('Uploading');
+                    }
                     return $translate.instant('Syncing');
                 case 'unknown':
                     return $translate.instant('Unknown');
@@ -1718,6 +1711,7 @@ angular.module('syncthing.core')
         $scope.showSettings = function () {
             // Make a working copy
             $scope.tmpOptions = angular.copy($scope.config.options);
+            $scope.tmpOptions.cloudreve = $scope.tmpOptions.cloudreve || {};
             $scope.tmpOptions.deviceName = $scope.thisDevice().name;
             $scope.tmpOptions.upgrades = "none";
             if ($scope.tmpOptions.autoUpgradeIntervalH > 0) {
@@ -2276,6 +2270,8 @@ angular.module('syncthing.core')
                 $scope.currentFolder.fsWatcherEnabled = false;
                 $scope.currentFolder.ignorePerms = true;
                 delete $scope.currentFolder.versioning;
+            } else if ($scope.currentFolder.type === 'uploadonly') {
+                $scope.currentFolder.fsWatcherEnabled = true;
             } else {
                 $scope.currentFolder.fsWatcherEnabled = true;
             }
@@ -2559,19 +2555,25 @@ angular.module('syncthing.core')
             var folderCfg = angular.copy($scope.currentFolder);
             $scope.currentSharing.selected[$scope.myID] = true;
             var newDevices = [];
-            folderCfg.devices.forEach(function (dev) {
-                if ($scope.currentSharing.selected[dev.deviceID] === true) {
-                    dev.encryptionPassword = $scope.currentSharing.encryptionPasswords[dev.deviceID];
-                    newDevices.push(dev);
-                    delete $scope.currentSharing.selected[dev.deviceID];
-                };
-            });
-            for (var deviceID in $scope.currentSharing.selected) {
-                if ($scope.currentSharing.selected[deviceID] === true) {
-                    newDevices.push({
-                        deviceID: deviceID,
-                        encryptionPassword: $scope.currentSharing.encryptionPasswords[deviceID],
-                    });
+            if (folderCfg.type === 'uploadonly') {
+                newDevices.push({
+                    deviceID: $scope.myID,
+                });
+            } else {
+                folderCfg.devices.forEach(function (dev) {
+                    if ($scope.currentSharing.selected[dev.deviceID] === true) {
+                        dev.encryptionPassword = $scope.currentSharing.encryptionPasswords[dev.deviceID];
+                        newDevices.push(dev);
+                        delete $scope.currentSharing.selected[dev.deviceID];
+                    };
+                });
+                for (var deviceID in $scope.currentSharing.selected) {
+                    if ($scope.currentSharing.selected[deviceID] === true) {
+                        newDevices.push({
+                            deviceID: deviceID,
+                            encryptionPassword: $scope.currentSharing.encryptionPasswords[deviceID],
+                        });
+                    }
                 }
             }
             folderCfg.devices = newDevices;
@@ -3122,6 +3124,15 @@ angular.module('syncthing.core')
                 $scope.failed = {};
             });
             showModal('#failed');
+        };
+
+        $scope.showUploadStatus = function (folder) {
+            $scope.uploads.folder = folder;
+            $scope.refreshUploadStatus(1, 10);
+            $('#uploadStatus').one('hidden.bs.modal', function () {
+                $scope.uploads = {};
+            });
+            showModal('#uploadStatus');
         };
 
         $scope.hasFailedFiles = function (folder) {

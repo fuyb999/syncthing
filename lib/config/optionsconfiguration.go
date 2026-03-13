@@ -75,13 +75,14 @@ type OptionsConfiguration struct {
 	// The maximum number of connections which we will allow in total, zero
 	// meaning no limit. Affects incoming connections and prevents
 	// attempting outgoing connections.
-	ConnectionLimitMax                 int `json:"connectionLimitMax" xml:"connectionLimitMax"`
-	ConnectionPriorityTCPLAN           int `json:"connectionPriorityTcpLan" xml:"connectionPriorityTcpLan" default:"10"`
-	ConnectionPriorityQUICLAN          int `json:"connectionPriorityQuicLan" xml:"connectionPriorityQuicLan" default:"20"`
-	ConnectionPriorityTCPWAN           int `json:"connectionPriorityTcpWan" xml:"connectionPriorityTcpWan" default:"30"`
-	ConnectionPriorityQUICWAN          int `json:"connectionPriorityQuicWan" xml:"connectionPriorityQuicWan" default:"40"`
-	ConnectionPriorityRelay            int `json:"connectionPriorityRelay" xml:"connectionPriorityRelay" default:"50"`
-	ConnectionPriorityUpgradeThreshold int `json:"connectionPriorityUpgradeThreshold" xml:"connectionPriorityUpgradeThreshold" default:"0"`
+	ConnectionLimitMax                 int                    `json:"connectionLimitMax" xml:"connectionLimitMax"`
+	ConnectionPriorityTCPLAN           int                    `json:"connectionPriorityTcpLan" xml:"connectionPriorityTcpLan" default:"10"`
+	ConnectionPriorityQUICLAN          int                    `json:"connectionPriorityQuicLan" xml:"connectionPriorityQuicLan" default:"20"`
+	ConnectionPriorityTCPWAN           int                    `json:"connectionPriorityTcpWan" xml:"connectionPriorityTcpWan" default:"30"`
+	ConnectionPriorityQUICWAN          int                    `json:"connectionPriorityQuicWan" xml:"connectionPriorityQuicWan" default:"40"`
+	ConnectionPriorityRelay            int                    `json:"connectionPriorityRelay" xml:"connectionPriorityRelay" default:"50"`
+	ConnectionPriorityUpgradeThreshold int                    `json:"connectionPriorityUpgradeThreshold" xml:"connectionPriorityUpgradeThreshold" default:"0"`
+	Cloudreve                          CloudreveConfiguration `json:"cloudreve" xml:"cloudreve"`
 	// Legacy deprecated
 	DeprecatedUPnPEnabled        bool     `json:"-" xml:"upnpEnabled,omitempty"`        // Deprecated: Do not use.
 	DeprecatedUPnPLeaseM         int      `json:"-" xml:"upnpLeaseMinutes,omitempty"`   // Deprecated: Do not use.
@@ -102,6 +103,7 @@ func (opts OptionsConfiguration) Copy() OptionsConfiguration {
 	copy(optsCopy.AlwaysLocalNets, opts.AlwaysLocalNets)
 	optsCopy.UnackedNotificationIDs = make([]string, len(opts.UnackedNotificationIDs))
 	copy(optsCopy.UnackedNotificationIDs, opts.UnackedNotificationIDs)
+	optsCopy.Cloudreve = opts.Cloudreve.Copy()
 	return optsCopy
 }
 
@@ -144,6 +146,8 @@ func (opts *OptionsConfiguration) prepare(guiPWIsSet bool) {
 	if opts.URAccepted > 0 && opts.URUniqueID == "" {
 		opts.URUniqueID = rand.String(8)
 	}
+
+	opts.Cloudreve.prepare()
 }
 
 // RequiresRestartOnly returns a copy with only the attributes that require

@@ -3,7 +3,7 @@
     <form role="form" name="folderEditor">
       <ul class="nav nav-tabs" ng-init="loadFormIntoScope(folderEditor)">
         <li ng-class="{'disabled': currentFolder._editing == 'new-ignores'}" class="active"><a data-toggle="tab" href="{{currentFolder._editing == 'new-ignores' ? '' : '#folder-general'}}"><span class="fas fa-cog"></span> <span translate>General</span></a></li>
-        <li ng-class="{'disabled': currentFolder._editing == 'new-ignores'}"><a data-toggle="tab" href="{{currentFolder._editing == 'new-ignores' ? '' : '#folder-sharing'}}"><span class="fas fa-share-alt"></span> <span translate>Sharing</span></a></li>
+        <li ng-class="{'disabled': currentFolder._editing == 'new-ignores' || currentFolder.type == 'uploadonly'}"><a data-toggle="tab" href="{{currentFolder._editing == 'new-ignores' || currentFolder.type == 'uploadonly' ? '' : '#folder-sharing'}}"><span class="fas fa-share-alt"></span> <span translate>Sharing</span></a></li>
         <li ng-class="{'disabled': currentFolder._editing == 'new-ignores'}"><a data-toggle="tab" href="{{currentFolder._editing == 'new-ignores' ? '' : '#folder-versioning'}}"><span class="fa fa-files-o"></span> <span translate>File Versioning</span></a></li>
         <li ng-class="{'disabled': currentFolder._recvEnc}"><a data-toggle="tab" href="{{currentFolder._recvEnc ? '' : '#folder-ignores'}}"><span class="fas fa-filter"></span> <span translate>Ignore Patterns</span></a></li>
         <li ng-class="{'disabled': currentFolder._editing == 'new-ignores'}"><a data-toggle="tab" href="{{currentFolder._editing == 'new-ignores' ? '' : '#folder-advanced'}}"><span class="fas fa-cogs"></span> <span translate>Advanced</span></a></li>
@@ -226,36 +226,44 @@
             <div class="col-md-6 form-group">
               <label translate>Folder Type</label>
               &nbsp;<a href="{{docsURL('users/foldertypes')}}" target="_blank"><span class="fas fa-question-circle"></span>&nbsp;<span translate>Help</span></a>
-              <select class="form-control" ng-change="setDefaultsForFolderType()" ng-model="currentFolder.type" ng-disabled="editingFolderExisting() && currentFolder.type == 'receiveencrypted'">
-                <option value="sendreceive" translate>Send &amp; Receive</option>
-                <option value="sendonly" translate>Send Only</option>
-                <option value="receiveonly" translate>Receive Only</option>
-                <option value="receiveencrypted" ng-disabled="editingFolderExisting()" translate>Receive Encrypted</option>
-              </select>
-              <p ng-if="currentFolder.type == 'sendonly'" translate class="help-block">Files are protected from changes made on other devices, but changes made on this device will be sent to the rest of the cluster.</p>
-              <p ng-if="currentFolder.type == 'receiveonly'" translate class="help-block">Files are synchronized from the cluster, but any changes made locally will not be sent to other devices.</p>
-              <p ng-if="currentFolder.type == 'receiveencrypted'" translate class="help-block" translate-value-receive-encrypted="{{'Receive Encrypted' | translate}}">Stores and syncs only encrypted data. Folders on all connected devices need to be set up with the same password or be of type "{%receiveEncrypted%}" too.</p>
-              <p ng-if="editingFolderExisting() && currentFolder.type == 'receiveencrypted'" translate class="help-block" translate-value-receive-encrypted="{{'Receive Encrypted' | translate}}">Folder type "{%receiveEncrypted%}" cannot be changed after adding the folder. You need to remove the folder, delete or decrypt the data on disk, and add the folder again.</p>
-              <p ng-if="editingFolderExisting() && currentFolder.type != 'receiveencrypted'" translate class="help-block" translate-value-receive-encrypted="{{'Receive Encrypted' | translate}}">Folder type "{%receiveEncrypted%}" can only be set when adding a new folder.</p>
-            </div>
-            <div class="col-md-6 form-group">
-              <label translate>File Pull Order</label>
-              <select class="form-control" ng-model="currentFolder.order" ng-if="currentFolder.type != 'sendonly'">
-                <option value="random" translate>Random</option>
-                <option value="alphabetic" translate>Alphabetic</option>
-                <option value="smallestFirst" translate>Smallest First</option>
-                <option value="largestFirst" translate>Largest First</option>
-                <option value="oldestFirst" translate>Oldest First</option>
-                <option value="newestFirst" translate>Newest First</option>
-              </select>
-              <select class="form-control" ng-if="currentFolder.type == 'sendonly'" disabled>
-                <option value="disabled" translate>Disabled</option>
-              </select>
-              <p class="help-block" ng-if="currentFolder.type === 'sendonly'" translate translate-value-foldertype="{{'Send Only' | translate}}">
-                Cannot be enabled when the folder type is "{%foldertype%}".
-              </p>
-            </div>
+            <select class="form-control" ng-change="setDefaultsForFolderType()" ng-model="currentFolder.type" ng-disabled="editingFolderExisting() && currentFolder.type == 'receiveencrypted'">
+              <option value="sendreceive" translate>Send &amp; Receive</option>
+              <option value="sendonly" translate>Send Only</option>
+              <option value="receiveonly" translate>Receive Only</option>
+              <option value="receiveencrypted" ng-disabled="editingFolderExisting()" translate>Receive Encrypted</option>
+              <option value="uploadonly" translate>Upload Only</option>
+            </select>
+            <p ng-if="currentFolder.type == 'sendonly'" translate class="help-block">Files are protected from changes made on other devices, but changes made on this device will be sent to the rest of the cluster.</p>
+            <p ng-if="currentFolder.type == 'receiveonly'" translate class="help-block">Files are synchronized from the cluster, but any changes made locally will not be sent to other devices.</p>
+            <p ng-if="currentFolder.type == 'receiveencrypted'" translate class="help-block" translate-value-receive-encrypted="{{'Receive Encrypted' | translate}}">Stores and syncs only encrypted data. Folders on all connected devices need to be set up with the same password or be of type "{%receiveEncrypted%}" too.</p>
+            <p ng-if="currentFolder.type == 'uploadonly'" translate class="help-block">Scans local files and uploads them to Cloudreve. This folder type is local only and does not share with Syncthing devices.</p>
+            <p ng-if="editingFolderExisting() && currentFolder.type == 'receiveencrypted'" translate class="help-block" translate-value-receive-encrypted="{{'Receive Encrypted' | translate}}">Folder type "{%receiveEncrypted%}" cannot be changed after adding the folder. You need to remove the folder, delete or decrypt the data on disk, and add the folder again.</p>
+            <p ng-if="editingFolderExisting() && currentFolder.type != 'receiveencrypted'" translate class="help-block" translate-value-receive-encrypted="{{'Receive Encrypted' | translate}}">Folder type "{%receiveEncrypted%}" can only be set when adding a new folder.</p>
           </div>
+          <div class="col-md-6 form-group">
+            <label translate>File Pull Order</label>
+            <select class="form-control" ng-model="currentFolder.order" ng-if="currentFolder.type != 'sendonly' && currentFolder.type != 'uploadonly'">
+              <option value="random" translate>Random</option>
+              <option value="alphabetic" translate>Alphabetic</option>
+              <option value="smallestFirst" translate>Smallest First</option>
+              <option value="largestFirst" translate>Largest First</option>
+              <option value="oldestFirst" translate>Oldest First</option>
+              <option value="newestFirst" translate>Newest First</option>
+            </select>
+            <select class="form-control" ng-if="currentFolder.type == 'sendonly' || currentFolder.type == 'uploadonly'" disabled>
+              <option value="disabled" translate>Disabled</option>
+            </select>
+            <p class="help-block" ng-if="currentFolder.type === 'sendonly' || currentFolder.type === 'uploadonly'" translate translate-value-foldertype="{{currentFolder.type === 'sendonly' ? ('Send Only' | translate) : ('Upload Only' | translate)}}">
+              Cannot be enabled when the folder type is "{%foldertype%}".
+            </p>
+          </div>
+        </div>
+
+        <div class="row" ng-if="currentFolder.type == 'uploadonly'">
+          <div class="col-md-12 form-group">
+            <p class="help-block" translate>Cloudreve connection settings are configured globally in Settings and automatically used by all Upload Only folders.</p>
+          </div>
+        </div>
 
           <div class="row">
             <div class="col-md-6 form-group" ng-class="{'has-error': folderEditor.minDiskFree.$invalid && folderEditor.minDiskFree.$dirty}">

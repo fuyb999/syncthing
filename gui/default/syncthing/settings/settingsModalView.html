@@ -100,6 +100,54 @@
               </div>
             </div>
           </div>
+
+          <div class="row">
+            <div class="col-md-6">
+              <div class="form-group">
+                <div class="checkbox">
+                  <label>
+                    <input id="CloudreveEnabled" type="checkbox" ng-model="tmpOptions.cloudreve.enabled" /> <span translate>Enable Cloudreve Upload Sync</span>
+                  </label>
+                </div>
+                <p class="help-block" translate>Shared Cloudreve configuration used by all Upload Only folders.</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="row">
+            <div class="col-md-6">
+              <div class="form-group">
+                <label translate for="CloudreveServer">Cloudreve Server</label>
+                <input id="CloudreveServer" class="form-control" type="text" ng-model="tmpOptions.cloudreve.server" placeholder="https://cloudreve.example.com" />
+                <p class="help-block" translate>Cloudreve server base URL.</p>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <div class="form-group">
+                <label translate for="CloudreveToken">Cloudreve Token</label>
+                <input id="CloudreveToken" class="form-control" type="password" ng-model="tmpOptions.cloudreve.token" />
+                <p class="help-block" translate>Personal access token used for upload requests.</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="row">
+            <div class="col-md-6">
+              <div class="form-group">
+                <label translate for="CloudreveBaseURI">Cloudreve Base URI</label>
+                <input id="CloudreveBaseURI" class="form-control" type="text" ng-model="tmpOptions.cloudreve.baseURI" placeholder="cloudreve://syncthing" />
+                <p class="help-block" translate>Remote directory prefix where files will be uploaded.</p>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <div class="form-group">
+                <label translate for="CloudreveWorkerCount">Upload Workers</label>
+                <input id="CloudreveWorkerCount" class="form-control" type="number" min="1" ng-model="tmpOptions.cloudreve.workerCount" />
+                <p class="help-block" translate>Number of concurrent upload workers shared by Upload Only folders.</p>
+              </div>
+            </div>
+          </div>
+
           <div>
             <label translate>Default Configuration</label>
             <p>

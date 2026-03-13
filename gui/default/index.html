@@ -354,7 +354,7 @@
 
           <div class="form-group">
             <label>
-              <input type="checkbox" id="stayLoggedIn" name="stayLoggedIn" ng-model="login.stayLoggedIn" >&nbsp;<span translate>Stay logged in</span>
+              <input type="checkbox" ng-model="login.stayLoggedIn" >&nbsp;<span translate>Stay logged in</span>
             </label>
           </div>
 
@@ -392,11 +392,13 @@
                     <span ng-if="folder.type == 'sendonly'" class="fas fa-fw fa-upload"></span>
                     <span ng-if="folder.type == 'receiveonly'" class="fas fa-fw fa-download"></span>
                     <span ng-if="folder.type == 'receiveencrypted'" class="fas fa-fw fa-lock"></span>
+                    <span ng-if="folder.type == 'uploadonly'" class="fas fa-fw fa-cloud-upload-alt"></span>
                   </div>
                   <div class="panel-status pull-right text-{{folderClass(folder)}}" ng-switch="folderStatus(folder)">
                     <span class="hidden-xs">{{folderStatusText(folder)}}</span>
                     <span ng-switch-when="scanning" ng-if="scanPercentage(folder.id) != undefined">({{scanPercentage(folder.id) | percent}})</span>
-                    <span ng-switch-when="syncing">({{syncPercentage(folder.id) | percent}}, {{model[folder.id].needBytes | binary}}B)</span>
+                    <span ng-switch-when="syncing" ng-if="folder.type != 'uploadonly'">({{syncPercentage(folder.id) | percent}}, {{model[folder.id].needBytes | binary}}B)</span>
+                    <span ng-switch-when="syncing" ng-if="folder.type == 'uploadonly'">({{syncPercentage(folder.id) | percent}}, {{(model[folder.id].uploadTotalBytes - model[folder.id].uploadDoneBytes) | binary}}B)</span>
                     <span class="inline-icon">
                       <span class="visible-xs fa fa-fw {{folderStatusIcon(folder)}}" aria-label="{{folderStatusText(folder)}}"></span>
                     </span>
@@ -469,6 +471,12 @@
                           <a href="" ng-click="showNeed(folder.id)">{{model[folder.id].needTotalItems | alwaysNumber | localeNumber}} <span translate>items</span>, ~{{model[folder.id].needBytes | binary}}B</a>
                         </td>
                       </tr>
+                      <tr ng-if="folder.type == 'uploadonly' && model[folder.id].uploadTotalItems > 0">
+                        <th><span class="fas fa-fw fa-cloud-upload-alt"></span>&nbsp;<span translate>Pending Uploads</span></th>
+                        <td class="text-right">
+                          <a href="" ng-click="showUploadStatus(folder.id)">{{model[folder.id].uploadTotalItems | alwaysNumber | localeNumber}} <span translate>items</span>, ~{{(model[folder.id].uploadTotalBytes - model[folder.id].uploadDoneBytes) | binary}}B</a>
+                        </td>
+                      </tr>
                       <tr ng-if="folderStatus(folder) === 'scanning' && scanRate(folder.id) > 0">
                         <th><span class="fas fa-fw fa-hourglass-half"></span>&nbsp;<span translate>Scan Time Remaining</span></th>
                         <td class="text-right">
@@ -495,6 +503,7 @@
                           <span ng-if="folder.type == 'sendonly'" translate>Send Only</span>
                           <span ng-if="folder.type == 'receiveonly'" translate>Receive Only</span>
                           <span ng-if="folder.type == 'receiveencrypted'" translate>Receive Encrypted</span>
+                          <span ng-if="folder.type == 'uploadonly'" translate>Upload Only</span>
                         </td>
                       </tr>
                       <tr ng-if="folder.ignorePerms">
@@ -536,7 +545,7 @@
                           </div>
                         </td>
                       </tr>
-                      <tr ng-if="folder.type != 'sendonly'">
+                      <tr ng-if="folder.type != 'sendonly' && folder.type != 'uploadonly'">
                         <th><span class="fas fa-fw fa-sort"></span>&nbsp;<span translate>File Pull Order</span></th>
                         <td class="text-right" ng-switch="folder.order">
                           <span ng-switch-when="random" translate>Random</span>
@@ -576,7 +585,7 @@
                           </span>
                         </td>
                       </tr>
-                      <tr>
+                      <tr ng-if="folder.type != 'uploadonly'">
                         <th><span class="fas fa-fw fa-share-alt"></span>&nbsp;<span translate>Shared With</span></th>
                         <td class="text-right no-overflow-ellipse overflow-break-word">
                           <span ng-repeat="device in otherDevices(folder.devices)">
@@ -599,7 +608,7 @@
                           <span>{{folderStats[folder.id].lastScan | date:'yyyy-MM-dd HH:mm:ss'}}</span>
                         </td>
                       </tr>
-                      <tr ng-if="folder.type != 'sendonly' && folder.type != 'receiveencrypted' && folderStats[folder.id].lastFile && folderStats[folder.id].lastFile.filename">
+                      <tr ng-if="folder.type != 'sendonly' && folder.type != 'receiveencrypted' && folder.type != 'uploadonly' && folderStats[folder.id].lastFile && folderStats[folder.id].lastFile.filename">
                         <th><span class="fas fa-fw fa-exchange-alt"></span>&nbsp;<span translate>Latest Change</span></th>
                         <td class="text-right">
                           <span tooltip data-original-title="{{folderStats[folder.id].lastFile.filename}} @ {{folderStats[folder.id].lastFile.at | date:'yyyy-MM-dd HH:mm:ss'}}">
@@ -1021,6 +1030,7 @@
   <ng-include src="'syncthing/usagereport/usageReportPreviewModalView.html'"></ng-include>
   <ng-include src="'syncthing/transfer/neededFilesModalView.html'"></ng-include>
   <ng-include src="'syncthing/transfer/failedFilesModalView.html'"></ng-include>
+  <ng-include src="'syncthing/transfer/uploadStatusModalView.html'"></ng-include>
   <ng-include src="'syncthing/transfer/remoteNeededFilesModalView.html'"></ng-include>
   <ng-include src="'syncthing/transfer/localChangedFilesModalView.html'"></ng-include>
   <ng-include src="'syncthing/core/upgradeModalView.html'"></ng-include>

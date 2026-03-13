@@ -116,6 +116,12 @@ type FolderSummary struct {
 
 	IgnorePatterns bool   `json:"ignorePatterns"`
 	WatchError     string `json:"watchError"`
+
+	UploadTotalItems   int   `json:"uploadTotalItems"`
+	UploadPendingItems int   `json:"uploadPendingItems"`
+	UploadingItems     int   `json:"uploadingItems"`
+	UploadTotalBytes   int64 `json:"uploadTotalBytes"`
+	UploadDoneBytes    int64 `json:"uploadDoneBytes"`
 }
 
 func (c *folderSummaryService) Summary(folder string) (*FolderSummary, error) {
@@ -172,6 +178,18 @@ func (c *folderSummaryService) Summary(folder string) (*FolderSummary, error) {
 		res.ReceiveOnlyChangedDeletes = ro.Deleted
 		res.ReceiveOnlyChangedBytes = ro.Bytes
 		res.ReceiveOnlyTotalItems = ro.TotalItems()
+	}
+	if haveFcfg && fcfg.Type == config.FolderTypeUploadOnly {
+		if provider, ok := c.model.(interface {
+			CloudreveSummary(string) cloudreveUploadSummary
+		}); ok {
+			upload := provider.CloudreveSummary(folder)
+			res.UploadTotalItems = upload.TotalItems
+			res.UploadPendingItems = upload.PendingItems
+			res.UploadingItems = upload.UploadingItems
+			res.UploadTotalBytes = upload.TotalBytes
+			res.UploadDoneBytes = upload.DoneBytes
+		}
 	}
 
 	res.InSyncFiles, res.InSyncBytes = global.Files-need.Files, global.Bytes-need.Bytes

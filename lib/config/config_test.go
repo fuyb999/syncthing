@@ -99,6 +99,10 @@ func TestDefaultValues(t *testing.T) {
 			ConnectionPriorityTCPWAN:  30,
 			ConnectionPriorityQUICWAN: 40,
 			ConnectionPriorityRelay:   50,
+			Cloudreve: CloudreveConfiguration{
+				BaseURI:     "cloudreve://syncthing",
+				WorkerCount: 2,
+			},
 		},
 		Defaults: Defaults{
 			Folder: FolderConfiguration{
@@ -125,6 +129,10 @@ func TestDefaultValues(t *testing.T) {
 					Entries:            []XattrFilterEntry{},
 					MaxSingleEntrySize: 1024,
 					MaxTotalSize:       4096,
+				},
+				Cloudreve: CloudreveConfiguration{
+					BaseURI:     "cloudreve://syncthing",
+					WorkerCount: 2,
 				},
 			},
 			Device: DeviceConfiguration{
@@ -203,6 +211,10 @@ func TestDeviceConfig(t *testing.T) {
 					MaxSingleEntrySize: 1024,
 					MaxTotalSize:       4096,
 					Entries:            []XattrFilterEntry{},
+				},
+				Cloudreve: CloudreveConfiguration{
+					BaseURI:     "cloudreve://syncthing",
+					WorkerCount: 2,
 				},
 			},
 		}
@@ -304,6 +316,10 @@ func TestOverriddenValues(t *testing.T) {
 		ConnectionPriorityTCPWAN:  50,
 		ConnectionPriorityQUICWAN: 55,
 		ConnectionPriorityRelay:   9000,
+		Cloudreve: CloudreveConfiguration{
+			BaseURI:     "cloudreve://syncthing",
+			WorkerCount: 2,
+		},
 	}
 	expectedPath := "/media/syncthing"
 
@@ -325,6 +341,43 @@ func TestOverriddenValues(t *testing.T) {
 
 	if path := cfg.DefaultFolder().Path; path != expectedPath {
 		t.Errorf("Default folder path is %v, expected %v", path, expectedPath)
+	}
+}
+
+func TestMigrateLegacyCloudreveToOptions(t *testing.T) {
+	cfg, err := ReadJSON(strings.NewReader(`{
+		"version": 51,
+		"folders": [{
+			"id": "upload",
+			"path": "/tmp/upload",
+			"type": "uploadonly",
+			"devices": [],
+			"cloudreve": {
+				"enabled": true,
+				"server": "https://cloudreve.example.com",
+				"token": "secret"
+			}
+		}],
+		"devices": []
+	}`), device1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Options.Cloudreve.Server != "https://cloudreve.example.com" {
+		t.Fatalf("unexpected migrated server: %q", cfg.Options.Cloudreve.Server)
+	}
+	if cfg.Options.Cloudreve.Token != "secret" {
+		t.Fatalf("unexpected migrated token: %q", cfg.Options.Cloudreve.Token)
+	}
+	if !cfg.Options.Cloudreve.Enabled {
+		t.Fatal("expected migrated cloudreve config to be enabled")
+	}
+	if cfg.Options.Cloudreve.BaseURI != "cloudreve://syncthing" {
+		t.Fatalf("unexpected migrated base uri: %q", cfg.Options.Cloudreve.BaseURI)
+	}
+	if cfg.Options.Cloudreve.WorkerCount != 2 {
+		t.Fatalf("unexpected migrated worker count: %d", cfg.Options.Cloudreve.WorkerCount)
 	}
 }
 
