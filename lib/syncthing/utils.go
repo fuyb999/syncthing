@@ -78,6 +78,8 @@ func DefaultConfig(path string, myID protocol.DeviceID, evLogger events.Logger, 
 		return nil, err
 	}
 
+	newCfg.ApplyInitialDefaults()
+
 	return config.Wrap(path, newCfg, myID, evLogger), nil
 }
 

@@ -381,6 +381,55 @@ func TestCloudreveAuthCallbackHandler(t *testing.T) {
 	}
 }
 
+func TestCloudreveAuthCallbackHandlerCreatesSessionWithoutGUIAuth(t *testing.T) {
+	t.Parallel()
+
+	store, wrapped, authMW := newTestCloudreveAuthMiddleware(t)
+	authMW.guiCfg = config.GUIConfiguration{}
+
+	authMW.cloudreveOAuth = cloudreve.NewOAuthManager(wrapped, store, &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			var body string
+			switch req.URL.Path {
+			case "/api/v4/session/oauth/token":
+				body = `{"access_token":"access-token","token_type":"Bearer","expires_in":3600,"refresh_token_expires_in":7200,"refresh_token":"refresh-token","scope":"openid profile offline_access Files.Write"}`
+			case "/api/v4/session/oauth/userinfo":
+				body = `{"sub":"user-1","preferred_username":"cloudreve-user","email":"user@example.com"}`
+			default:
+				t.Fatalf("unexpected oauth request path: %s", req.URL.Path)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewBufferString(body)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "https://syncthing.example.com/rest/noauth/auth/cloudreve/callback?state=test-state&code=test-code", nil)
+	req.AddCookie(&http.Cookie{Name: authMW.cloudreveStateName, Value: "test-state"})
+	req.AddCookie(&http.Cookie{Name: authMW.cloudreveStayName, Value: "1"})
+	req.AddCookie(&http.Cookie{Name: authMW.cloudrevePKCEName, Value: "pkce-verifier"})
+	rec := httptest.NewRecorder()
+
+	authMW.cloudreveAuthCallbackHandler(rec, req)
+
+	resp := rec.Result()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+
+	var hasSessionCookie bool
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == authMW.tokenCookieManager.cookieName && cookie.Value != "" {
+			hasSessionCookie = true
+		}
+	}
+	if !hasSessionCookie {
+		t.Fatal("expected GUI session cookie to be created for cloudreve-only auth")
+	}
+}
+
 func TestCloudreveAuthCallbackHandlerIncludesFailureDetail(t *testing.T) {
 	t.Parallel()
 

@@ -139,6 +139,15 @@ func isNoAuthPath(path string, metricsWithoutAuth bool) bool {
 		})
 }
 
+func isCloudreveSessionAuthEnabled(cloudCfg config.CloudreveConfiguration) bool {
+	cloudCfg = cloudCfg.Normalized()
+	return cloudCfg.Enabled && cloudCfg.HasOAuthClientCredentials()
+}
+
+func isSessionAuthEnabled(guiCfg config.GUIConfiguration, cloudCfg config.CloudreveConfiguration) bool {
+	return guiCfg.IsAuthEnabled() || isCloudreveSessionAuthEnabled(cloudCfg)
+}
+
 type basicAuthAndSessionMiddleware struct {
 	tokenCookieManager *tokenCookieManager
 	cfg                config.Wrapper
@@ -167,6 +176,10 @@ func newBasicAuthAndSessionMiddleware(tokenCookieManager *tokenCookieManager, gu
 		next:               next,
 		evLogger:           evLogger,
 	}
+}
+
+func (m *basicAuthAndSessionMiddleware) isSessionAuthEnabled() bool {
+	return isSessionAuthEnabled(m.guiCfg, m.cfg.Options().Cloudreve)
 }
 
 func (m *basicAuthAndSessionMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -325,7 +338,7 @@ func (m *basicAuthAndSessionMiddleware) cloudreveAuthCallbackHandler(w http.Resp
 		return
 	}
 
-	if m.guiCfg.IsAuthEnabled() && !m.tokenCookieManager.hasValidSession(r) {
+	if m.isSessionAuthEnabled() && !m.tokenCookieManager.hasValidSession(r) {
 		stayLoggedIn, _ := m.cookieValue(r, m.cloudreveStayName)
 		m.tokenCookieManager.createSession(firstNonEmpty(session.UserName, session.UserEmail, session.UserSub, "cloudreve"), stayLoggedIn == "1", w, r)
 	}

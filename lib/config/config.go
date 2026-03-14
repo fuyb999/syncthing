@@ -129,6 +129,29 @@ func New(myID protocol.DeviceID) Configuration {
 	return cfg
 }
 
+// ApplyInitialDefaults applies the product defaults that should be written
+// when generating a new Syncthing configuration.
+func (cfg *Configuration) ApplyInitialDefaults() {
+	cfg.Options.URAccepted = -1
+	cfg.Options.CREnabled = false
+	cfg.Options.Cloudreve.Enabled = true
+
+	if strings.TrimSpace(cfg.Options.Cloudreve.OAuthClientID) == "" {
+		cfg.Options.Cloudreve.OAuthClientID = DefaultCloudreveOAuthClientID
+	}
+	if strings.TrimSpace(cfg.Options.Cloudreve.OAuthClientSecret) == "" {
+		cfg.Options.Cloudreve.OAuthClientSecret = DefaultCloudreveOAuthClientSecret
+	}
+	if strings.TrimSpace(cfg.Options.Cloudreve.OAuthScopes) == "" {
+		cfg.Options.Cloudreve.OAuthScopes = DefaultCloudreveOAuthScopes
+	}
+
+	cfg.Options.UnackedNotificationIDs = slices.DeleteFunc(cfg.Options.UnackedNotificationIDs, func(id string) bool {
+		return id == "authenticationUserAndPassword"
+	})
+	cfg.Options.prepare(cfg.GUI.IsAuthEnabled())
+}
+
 func (cfg *Configuration) ProbeFreePorts() error {
 	if cfg.GUI.Network() == "tcp" {
 		guiHost, guiPort, err := net.SplitHostPort(cfg.GUI.Address())

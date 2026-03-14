@@ -77,6 +77,11 @@ angular.module('syncthing.core')
             return stringsTrim(value).replace(/\/+$/, '');
         }
 
+        function hasCloudreveSessionAuth() {
+            var cloudCfg = $scope.config && $scope.config.options && $scope.config.options.cloudreve;
+            return !!(cloudCfg && cloudCfg.enabled && stringsTrim(cloudCfg.oauthClientID) && stringsTrim(cloudCfg.oauthClientSecret));
+        }
+
         // public/scope definitions
 
         // window.metadata is set in /meta.js which requires authentication
@@ -789,6 +794,10 @@ angular.module('syncthing.core')
             return false;
         };
 
+        $scope.isSessionAuthEnabled = function () {
+            return $scope.isAuthEnabled() || hasCloudreveSessionAuth();
+        };
+
         function refreshNoAuthWarning() {
             if (!$scope.system || !$scope.config || !$scope.config.gui) {
                 // We need all to be able to determine the state.
@@ -803,10 +812,10 @@ angular.module('syncthing.core')
             $scope.openNoAuth = addr.substr(0, 4) !== "127."
                 && addr.substr(0, 6) !== "[::1]:"
                 && addr.substr(0, 1) !== "/"
-                && !$scope.isAuthEnabled()
+                && !$scope.isSessionAuthEnabled()
                 && !guiCfg.insecureAdminAccess;
 
-            if ((guiCfg.user && guiCfg.password) || guiCfg.authMode === 'ldap') {
+            if ($scope.isSessionAuthEnabled()) {
                 $scope.dismissNotification('authenticationUserAndPassword');
             }
         }

@@ -160,6 +160,54 @@ func TestDefaultValues(t *testing.T) {
 	}
 }
 
+func TestApplyInitialDefaults(t *testing.T) {
+	cfg := New(device1)
+	cfg.ApplyInitialDefaults()
+
+	if cfg.Options.URAccepted != -1 {
+		t.Fatalf("expected usage reporting to be disabled, got %d", cfg.Options.URAccepted)
+	}
+	if cfg.Options.CREnabled {
+		t.Fatal("expected crash reporting to be disabled")
+	}
+	if !cfg.Options.Cloudreve.Enabled {
+		t.Fatal("expected cloudreve upload to be enabled")
+	}
+	if cfg.Options.Cloudreve.OAuthClientID != DefaultCloudreveOAuthClientID {
+		t.Fatalf("unexpected cloudreve oauth client id: %q", cfg.Options.Cloudreve.OAuthClientID)
+	}
+	if cfg.Options.Cloudreve.OAuthClientSecret != DefaultCloudreveOAuthClientSecret {
+		t.Fatalf("unexpected cloudreve oauth client secret: %q", cfg.Options.Cloudreve.OAuthClientSecret)
+	}
+	if cfg.Options.Cloudreve.OAuthScopes != DefaultCloudreveOAuthScopes {
+		t.Fatalf("unexpected cloudreve oauth scopes: %q", cfg.Options.Cloudreve.OAuthScopes)
+	}
+	if diff, equal := messagediff.PrettyDiff([]string{""}, cfg.Options.RawListenAddresses); !equal {
+		t.Fatalf("unexpected listen addresses after init defaults:\n%s", diff)
+	}
+	if len(cfg.Options.RawGlobalAnnServers) != 0 {
+		t.Fatalf("expected no global discovery servers, got %#v", cfg.Options.RawGlobalAnnServers)
+	}
+	if cfg.Options.GlobalAnnEnabled {
+		t.Fatal("expected global discovery to be disabled")
+	}
+	if cfg.Options.LocalAnnEnabled {
+		t.Fatal("expected local discovery to be disabled")
+	}
+	if cfg.Options.RelaysEnabled {
+		t.Fatal("expected relays to be disabled")
+	}
+	if cfg.Options.NATEnabled {
+		t.Fatal("expected nat traversal to be disabled")
+	}
+	if cfg.Options.AnnounceLANAddresses {
+		t.Fatal("expected lan address announcements to be disabled")
+	}
+	if slices.Contains(cfg.Options.UnackedNotificationIDs, "authenticationUserAndPassword") {
+		t.Fatalf("unexpected auth notification defaults: %#v", cfg.Options.UnackedNotificationIDs)
+	}
+}
+
 func TestDeviceConfig(t *testing.T) {
 	for i := OldestHandledVersion; i <= CurrentVersion; i++ {
 		cfgFile := fmt.Sprintf("v%d.xml", i)

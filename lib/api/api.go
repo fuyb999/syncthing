@@ -372,19 +372,20 @@ func (s *service) Serve(ctx context.Context) error {
 
 	tokenCookieManager := newTokenCookieManager(s.id.Short().String(), guiCfg, s.evLogger, s.miscDB)
 	authMW := newBasicAuthAndSessionMiddleware(tokenCookieManager, guiCfg, s.cfg.LDAP(), s.cfg, s.miscDB, s.model, handler, s.evLogger)
+	sessionAuthEnabled := isSessionAuthEnabled(guiCfg, s.cfg.Options().Cloudreve)
 
 	restMux.Handler(http.MethodGet, "/rest/noauth/auth/cloudreve/status", http.HandlerFunc(authMW.cloudreveAuthStatusHandler))
 	restMux.Handler(http.MethodGet, "/rest/noauth/auth/cloudreve/login", http.HandlerFunc(authMW.cloudreveAuthLoginHandler))
 	restMux.Handler(http.MethodGet, "/rest/noauth/auth/cloudreve/callback", http.HandlerFunc(authMW.cloudreveAuthCallbackHandler))
 
-	// Wrap everything in basic auth, if user/password is set.
-	if guiCfg.IsAuthEnabled() {
+	if sessionAuthEnabled {
 		handler = authMW
-
-		restMux.Handler(http.MethodPost, "/rest/noauth/auth/password", http.HandlerFunc(authMW.passwordAuthHandler))
 
 		// Logout is a no-op without a valid session cookie, so /noauth/ is fine here
 		restMux.Handler(http.MethodPost, "/rest/noauth/auth/logout", http.HandlerFunc(authMW.handleLogout))
+	}
+	if guiCfg.IsAuthEnabled() {
+		restMux.Handler(http.MethodPost, "/rest/noauth/auth/password", http.HandlerFunc(authMW.passwordAuthHandler))
 	}
 
 	// Redirect to HTTPS if we are supposed to

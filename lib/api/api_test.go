@@ -1089,6 +1089,42 @@ func startHTTPWithShutdownTimeout(t *testing.T, cfg config.Wrapper, shutdownTime
 	return baseURL
 }
 
+func TestCloudreveSessionAuthProtectsAPIWithoutGUIAuth(t *testing.T) {
+	t.Parallel()
+
+	rawCfg := config.New(protocol.LocalDeviceID)
+	rawCfg.GUI = config.GUIConfiguration{
+		Enabled:    true,
+		RawAddress: "127.0.0.1:0",
+	}
+	rawCfg.Options.Cloudreve.Enabled = true
+	rawCfg.Options.Cloudreve.OAuthClientID = config.DefaultCloudreveOAuthClientID
+	rawCfg.Options.Cloudreve.OAuthClientSecret = config.DefaultCloudreveOAuthClientSecret
+
+	cfg := config.Wrap("/dev/null", rawCfg, protocol.LocalDeviceID, events.NoopLogger)
+	baseURL := startHTTP(t, cfg)
+
+	resp, err := http.Get(baseURL + "/rest/system/ping")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected protected API to reject unauthenticated request, got %s", resp.Status)
+	}
+
+	resp, err = http.Get(baseURL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected login page to remain accessible, got %s", resp.Status)
+	}
+}
+
 func TestCSRFRequired(t *testing.T) {
 	t.Parallel()
 

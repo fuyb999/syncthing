@@ -26,7 +26,6 @@ import (
 )
 
 const (
-	DefaultOAuthScopes       = "profile email openid offline_access UserInfo.Write Workflow.Write Files.Write Shares.Write"
 	oauthSessionKey          = "cloudreve/oauth/session"
 	oauthRefreshInterval     = time.Minute
 	oauthRefreshLeeway       = 2 * time.Minute
@@ -454,7 +453,7 @@ func (m *OAuthManager) isConfigured(cfg config.CloudreveConfiguration) bool {
 func oauthScopes(cfg config.CloudreveConfiguration) string {
 	fields := strings.Fields(cfg.OAuthScopes)
 	if len(fields) == 0 {
-		fields = strings.Fields(DefaultOAuthScopes)
+		fields = strings.Fields(config.DefaultCloudreveOAuthScopes)
 	}
 
 	seen := make(map[string]struct{}, len(fields)+3)

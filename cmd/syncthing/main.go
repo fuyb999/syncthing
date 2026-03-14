@@ -647,6 +647,7 @@ func loadOrDefaultConfig() (config.Wrapper, error) {
 	cfg, _, err := config.Load(cfgFile, protocol.EmptyDeviceID, events.NoopLogger)
 	if err != nil {
 		newCfg := config.New(protocol.EmptyDeviceID)
+		newCfg.ApplyInitialDefaults()
 		return config.Wrap(cfgFile, newCfg, protocol.EmptyDeviceID, events.NoopLogger), nil
 	}
 
