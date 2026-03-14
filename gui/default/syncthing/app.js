@@ -17,6 +17,7 @@ var syncthing = angular.module('syncthing', [
 
 var urlbase = 'rest';
 var authUrlbase = urlbase + '/noauth/auth';
+var forcedLocale = 'zh-CN';
 
 // keep consistent with ShortIDStringLength in lib/protocol/deviceid.go
 var shortIDStringLength = 7;
@@ -29,10 +30,12 @@ syncthing.config(function ($httpProvider, $translateProvider, LocaleServiceProvi
         prefix: 'assets/lang/lang-',
         suffix: '.json'
     });
-    $translateProvider.fallbackLanguage('en');
+    $translateProvider.fallbackLanguage(forcedLocale);
+    $translateProvider.preferredLanguage(forcedLocale);
 
     LocaleServiceProvider.setAvailableLocales(validLangs);
-    LocaleServiceProvider.setDefaultLocale('en');
+    LocaleServiceProvider.setDefaultLocale(forcedLocale);
+    LocaleServiceProvider.setForcedLocale(forcedLocale);
 
     $httpProvider.useApplyAsync(true);
 

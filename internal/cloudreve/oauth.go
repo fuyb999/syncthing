@@ -50,6 +50,7 @@ type OAuthSession struct {
 type OAuthStatus struct {
 	Available  bool   `json:"available"`
 	Authorized bool   `json:"authorized"`
+	Server     string `json:"server,omitempty"`
 	UserName   string `json:"userName,omitempty"`
 	UserEmail  string `json:"userEmail,omitempty"`
 	Scope      string `json:"scope,omitempty"`
@@ -117,8 +118,10 @@ func (m *OAuthManager) Serve(ctx context.Context) error {
 }
 
 func (m *OAuthManager) Status() OAuthStatus {
+	cfg := m.config()
 	status := OAuthStatus{
-		Available: m.isConfigured(m.config()),
+		Available: m.isConfigured(cfg),
+		Server:    strings.TrimSpace(cfg.Server),
 	}
 	if !status.Available {
 		return status
@@ -445,7 +448,7 @@ func (m *OAuthManager) config() config.CloudreveConfiguration {
 }
 
 func (m *OAuthManager) isConfigured(cfg config.CloudreveConfiguration) bool {
-	return cfg.Enabled && strings.TrimSpace(cfg.Server) != "" && strings.TrimSpace(cfg.OAuthClientID) != "" && strings.TrimSpace(cfg.OAuthClientSecret) != ""
+	return strings.TrimSpace(cfg.Server) != "" && strings.TrimSpace(cfg.OAuthClientID) != "" && strings.TrimSpace(cfg.OAuthClientSecret) != ""
 }
 
 func oauthScopes(cfg config.CloudreveConfiguration) string {

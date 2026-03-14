@@ -141,6 +141,7 @@ func isNoAuthPath(path string, metricsWithoutAuth bool) bool {
 
 type basicAuthAndSessionMiddleware struct {
 	tokenCookieManager *tokenCookieManager
+	cfg                config.Wrapper
 	guiCfg             config.GUIConfiguration
 	ldapCfg            config.LDAPConfiguration
 	model              libmodel.Model
@@ -155,6 +156,7 @@ type basicAuthAndSessionMiddleware struct {
 func newBasicAuthAndSessionMiddleware(tokenCookieManager *tokenCookieManager, guiCfg config.GUIConfiguration, ldapCfg config.LDAPConfiguration, cfg config.Wrapper, miscDB *db.Typed, model libmodel.Model, next http.Handler, evLogger events.Logger) *basicAuthAndSessionMiddleware {
 	return &basicAuthAndSessionMiddleware{
 		tokenCookieManager: tokenCookieManager,
+		cfg:                cfg,
 		guiCfg:             guiCfg,
 		ldapCfg:            ldapCfg,
 		model:              model,
@@ -257,6 +259,19 @@ func (m *basicAuthAndSessionMiddleware) cloudreveAuthStatusHandler(w http.Respon
 }
 
 func (m *basicAuthAndSessionMiddleware) cloudreveAuthLoginHandler(w http.ResponseWriter, r *http.Request) {
+	if rawServer := strings.TrimSpace(r.URL.Query().Get("server")); rawServer != "" {
+		normalizedServer, err := normalizeCloudreveServer(rawServer)
+		if err != nil {
+			m.redirectCloudreveAuthError(w, r, cloudreveAuthErrorFailed, err.Error())
+			return
+		}
+		if err := m.setCloudreveServer(normalizedServer); err != nil {
+			slog.Warn("Failed to update Cloudreve server before OAuth login", slogutil.Error(err))
+			m.redirectCloudreveAuthError(w, r, cloudreveAuthErrorFailed, "")
+			return
+		}
+	}
+
 	stayLoggedIn, _ := strconv.ParseBool(r.URL.Query().Get("stayLoggedIn"))
 	state := rand.String(randomTokenLength)
 	codeVerifier := rand.String(randomTokenLength)
@@ -320,6 +335,52 @@ func (m *basicAuthAndSessionMiddleware) cloudreveAuthCallbackHandler(w http.Resp
 	}
 
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+func (m *basicAuthAndSessionMiddleware) setCloudreveServer(server string) error {
+	current := m.cfg.Options().Cloudreve.Normalized()
+	currentServer, _ := normalizeCloudreveServer(current.Server)
+	if currentServer == server {
+		return nil
+	}
+
+	waiter, err := m.cfg.Modify(func(cfg *config.Configuration) {
+		cfg.Options.Cloudreve.Server = server
+		cfg.Options.Cloudreve.BaseURI = cfg.Options.Cloudreve.Normalized().BaseURI
+	})
+	if err != nil {
+		return err
+	}
+	waiter.Wait()
+	return m.cloudreveOAuth.ClearSession()
+}
+
+func normalizeCloudreveServer(raw string) (string, error) {
+	server := strings.TrimSpace(raw)
+	if server == "" {
+		return "", fmt.Errorf("Cloudreve server URL is required")
+	}
+	if !strings.Contains(server, "://") {
+		server = "https://" + server
+	}
+
+	u, err := url.Parse(server)
+	if err != nil {
+		return "", fmt.Errorf("invalid Cloudreve server URL")
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("invalid Cloudreve server URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("Cloudreve server URL must start with http:// or https://")
+	}
+	if strings.TrimSpace(u.Host) == "" {
+		return "", fmt.Errorf("invalid Cloudreve server URL")
+	}
+
+	u.RawQuery = ""
+	u.Fragment = ""
+	return strings.TrimRight(u.String(), "/"), nil
 }
 
 func (m *basicAuthAndSessionMiddleware) redirectCloudreveAuthError(w http.ResponseWriter, r *http.Request, reason, detail string) {

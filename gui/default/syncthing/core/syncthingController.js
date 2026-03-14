@@ -10,6 +10,7 @@ angular.module('syncthing.core')
         var prevDate = 0;
         var cloudreveRateTimer = null;
         var cloudreveRateIntervalMs = 1000;
+        var cloudreveAutoLoginStarted = false;
         var navigatingAway = false;
         var online = false;
         var restarting = false;
@@ -18,6 +19,7 @@ angular.module('syncthing.core')
             LocaleService.autoConfigLocale();
 
             if (!$scope.authenticated) {
+                initializeCloudreveLogin();
                 applyCloudreveAuthError();
                 refreshCloudreveAuthStatus();
 
@@ -40,19 +42,56 @@ angular.module('syncthing.core')
             Events.start();
         }
 
+        function stringsTrim(value) {
+            if (value === undefined || value === null) {
+                return '';
+            }
+            return String(value).trim();
+        }
+
+        function initializeCloudreveLogin() {
+            var queryServer = stringsTrim($location.search().cloudreveServer);
+            if (!queryServer) {
+                return;
+            }
+            $scope.login.cloudreveServer = queryServer;
+            $scope.login.autoCloudreve = true;
+        }
+
+        function maybeAutoStartCloudreveLogin() {
+            if ($scope.authenticated || cloudreveAutoLoginStarted || !$scope.login.autoCloudreve) {
+                return;
+            }
+            if (!stringsTrim($scope.login.cloudreveServer)) {
+                return;
+            }
+            cloudreveAutoLoginStarted = true;
+            $scope.authenticateCloudreve($scope.login.cloudreveServer, $scope.login.stayLoggedIn);
+        }
+
+        function cloudreveDisplayName() {
+            return stringsTrim($scope.cloudreveAuth.userName) || stringsTrim($scope.cloudreveAuth.userEmail);
+        }
+
+        function trimmedServer(value) {
+            return stringsTrim(value).replace(/\/+$/, '');
+        }
+
         // public/scope definitions
 
         // window.metadata is set in /meta.js which requires authentication
         $scope.authenticated = window.metadata && window.metadata.authenticated;
 
         $scope.login = {
-            username: '',
-            password: '',
             errors: {},
+            cloudreveServer: '',
         };
         $scope.cloudreveAuth = {
-            available: false,
+            available: !!(window.metadata && window.metadata.cloudreveServer),
             authorized: false,
+            server: window.metadata && window.metadata.cloudreveServer || '',
+            userName: window.metadata && window.metadata.cloudreveUserName || '',
+            userEmail: window.metadata && window.metadata.cloudreveUserEmail || '',
         };
         $scope.completion = {};
         $scope.config = {};
@@ -149,12 +188,26 @@ angular.module('syncthing.core')
             });
         };
 
-        $scope.authenticateCloudreve = function (stayLoggedIn) {
+        $scope.authenticateCloudreve = function (server, stayLoggedIn) {
             var persistent = stayLoggedIn;
+            var target = authUrlbase + '/cloudreve/login';
+            var serverValue = stringsTrim(server);
+
             if (persistent === undefined) {
                 persistent = !!$scope.login.stayLoggedIn;
             }
-            window.location.href = authUrlbase + '/cloudreve/login?stayLoggedIn=' + (!!persistent);
+
+            if (!serverValue) {
+                serverValue = stringsTrim($scope.login.cloudreveServer);
+            }
+            if (!serverValue) {
+                return;
+            }
+
+            $scope.login.inProgress = true;
+            $scope.login.cloudreveServer = serverValue;
+            target += '?stayLoggedIn=' + (!!persistent) + '&server=' + encodeURIComponent(serverValue);
+            window.location.href = target;
         };
 
         $scope.logout = function() {
@@ -164,6 +217,12 @@ angular.module('syncthing.core')
             }).catch(function (response) {
                 console.log('Failed to log out:', response);
             });
+        };
+
+        $scope.cloudreveAuthMatchesLoginServer = function () {
+            var configured = trimmedServer($scope.cloudreveAuth.server);
+            var selected = trimmedServer($scope.login.cloudreveServer);
+            return !selected || !configured || configured === selected;
         };
 
         $scope.cloudreveOAuthCallbackURI = function () {
@@ -952,17 +1011,22 @@ angular.module('syncthing.core')
         }
 
         function refreshCloudreveAuthStatus() {
-            $http.get(authUrlbase + '/cloudreve/status').success(function (data) {
+            return $http.get(authUrlbase + '/cloudreve/status').success(function (data) {
                 $scope.cloudreveAuth = data || {
                     available: false,
                     authorized: false,
                 };
+                if (!$scope.login.cloudreveServer && $scope.cloudreveAuth.server) {
+                    $scope.login.cloudreveServer = $scope.cloudreveAuth.server;
+                }
+                maybeAutoStartCloudreveLogin();
             }).error(function (response) {
                 $scope.cloudreveAuth = {
                     available: false,
                     authorized: false,
                 };
                 console.log('Failed to refresh Cloudreve OAuth status:', response);
+                maybeAutoStartCloudreveLogin();
             });
         }
 
@@ -1901,6 +1965,10 @@ angular.module('syncthing.core')
         };
 
         $scope.thisDeviceName = function () {
+            var userName = cloudreveDisplayName();
+            if (userName) {
+                return userName;
+            }
             var device = $scope.thisDevice();
             if (typeof device === 'undefined') {
                 return '(' + $translate.instant("unknown device") + ')';

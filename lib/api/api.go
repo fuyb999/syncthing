@@ -42,6 +42,7 @@ import (
 	"golang.org/x/text/transform"
 	"golang.org/x/text/unicode/norm"
 
+	"github.com/syncthing/syncthing/internal/cloudreve"
 	"github.com/syncthing/syncthing/internal/db"
 	"github.com/syncthing/syncthing/internal/slogutil"
 	"github.com/syncthing/syncthing/lib/build"
@@ -702,10 +703,14 @@ func (*service) getSystemPaths(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *service) getJSMetadata(w http.ResponseWriter, _ *http.Request) {
+	cloudreveStatus := cloudreve.NewOAuthManager(s.cfg, s.miscDB, nil).Status()
 	meta, _ := json.Marshal(map[string]interface{}{
-		"deviceID":      s.id.String(),
-		"deviceIDShort": s.id.Short().String(),
-		"authenticated": true,
+		"deviceID":           s.id.String(),
+		"deviceIDShort":      s.id.Short().String(),
+		"authenticated":      true,
+		"cloudreveUserName":  cloudreveStatus.UserName,
+		"cloudreveUserEmail": cloudreveStatus.UserEmail,
+		"cloudreveServer":    cloudreveStatus.Server,
 	})
 	w.Header().Set("Content-Type", "application/javascript")
 	fmt.Fprintf(w, "var metadata = %s;\n", meta)

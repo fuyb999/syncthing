@@ -8,6 +8,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -262,6 +263,46 @@ func TestCloudreveAuthLoginHandler(t *testing.T) {
 	}
 }
 
+func TestCloudreveAuthLoginHandlerUpdatesServerFromQuery(t *testing.T) {
+	t.Parallel()
+
+	_, wrapped, authMW := newTestCloudreveAuthMiddleware(t)
+	if err := authMW.cloudreveOAuth.SaveSession(cloudreve.OAuthSession{
+		RefreshToken:   "refresh-token",
+		RefreshExpires: time.Now().Add(time.Hour),
+		UserName:       "old-user",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "https://syncthing.example.com/rest/noauth/auth/cloudreve/login?server=cloudreve.local%3A5212%2Fdrive%2F", nil)
+	rec := httptest.NewRecorder()
+
+	authMW.cloudreveAuthLoginHandler(rec, req)
+
+	resp := rec.Result()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+
+	location := resp.Header.Get("Location")
+	if !strings.HasPrefix(location, "https://cloudreve.local:5212/drive/session/authorize?") {
+		t.Fatalf("unexpected authorize redirect: %s", location)
+	}
+
+	if got := wrapped.Options().Cloudreve.Server; got != "https://cloudreve.local:5212/drive" {
+		t.Fatalf("unexpected configured server: %q", got)
+	}
+
+	status := authMW.cloudreveOAuth.Status()
+	if status.Authorized {
+		t.Fatalf("expected oauth session to be cleared after server change: %#v", status)
+	}
+	if status.Server != "https://cloudreve.local:5212/drive" {
+		t.Fatalf("unexpected oauth status server: %q", status.Server)
+	}
+}
+
 func TestCloudreveAuthCallbackHandler(t *testing.T) {
 	t.Parallel()
 
@@ -405,6 +446,9 @@ func newTestCloudreveAuthMiddleware(t *testing.T) (*db.Typed, config.Wrapper, *b
 		OAuthClientSecret: "syncthing-secret",
 	}
 	wrapped := config.Wrap("/dev/null", cfg, protocol.LocalDeviceID, events.NoopLogger)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go wrapped.Serve(ctx)
 	store := db.NewMiscDB(mdb)
 	model := &modelmocks.Model{}
 	authMW := newBasicAuthAndSessionMiddleware(

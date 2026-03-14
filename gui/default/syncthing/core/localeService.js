@@ -17,6 +17,7 @@ angular.module('syncthing.core')
 
         var _defaultLocale,
             _availableLocales,
+            _forcedLocale,
             _localStorage = detectLocalStorage();
 
         var _SYNLANG = "SYN_LANG"; // const key for localStorage
@@ -27,6 +28,10 @@ angular.module('syncthing.core')
 
         this.setAvailableLocales = function (locales) {
             _availableLocales = locales;
+        };
+
+        this.setForcedLocale = function (locale) {
+            _forcedLocale = locale;
         };
 
 
@@ -44,6 +49,11 @@ angular.module('syncthing.core')
             }
 
             function autoConfigLocale() {
+                if (_forcedLocale) {
+                    useLocale(_forcedLocale, true);
+                    return;
+                }
+
                 var params = $location.search();
                 var savedLang;
                 if (_localStorage) {
@@ -101,11 +111,13 @@ angular.module('syncthing.core')
             }
 
             function useLocale(language, save2Storage) {
-                if (language) {
-                    $translate.use(language).then(function () {
-                        document.documentElement.setAttribute("lang", language);
-                        if (save2Storage && _localStorage)
-                            _localStorage[_SYNLANG] = language;
+                var selected = _forcedLocale || language || _defaultLocale;
+
+                if (selected) {
+                    $translate.use(selected).then(function () {
+                        document.documentElement.setAttribute("lang", selected);
+                        if ((save2Storage || _forcedLocale) && _localStorage)
+                            _localStorage[_SYNLANG] = selected;
                     });
                 }
             }
@@ -114,7 +126,7 @@ angular.module('syncthing.core')
                 autoConfigLocale: autoConfigLocale,
                 useLocale: useLocale,
                 getCurrentLocale: function () { return $translate.use() },
-                getAvailableLocales: function () { return _availableLocales },
+                getAvailableLocales: function () { return _forcedLocale ? [_forcedLocale] : _availableLocales },
                 // langPrettyprint comes from an included global
                 getLocalesDisplayNames: function () { return langPrettyprint }
             }

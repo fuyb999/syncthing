@@ -48,6 +48,7 @@ func TestUploadFileLocalFlow(t *testing.T) {
 		createURI    string
 		createMime   string
 		chunks       []string
+		lengths      []int64
 		progresses   []int64
 	)
 
@@ -74,6 +75,7 @@ func TestUploadFileLocalFlow(t *testing.T) {
 			if got := r.Header.Get("Authorization"); got != "Bearer token" {
 				t.Fatalf("unexpected auth header: %q", got)
 			}
+			lengths = append(lengths, r.ContentLength)
 			body, _ := io.ReadAll(r.Body)
 			chunks = append(chunks, string(body))
 			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": nil})
@@ -103,6 +105,9 @@ func TestUploadFileLocalFlow(t *testing.T) {
 	if len(chunks) != 2 || chunks[0] != "abcd" || chunks[1] != "efgh" {
 		t.Fatalf("unexpected chunks: %#v", chunks)
 	}
+	if len(lengths) != 2 || lengths[0] != 4 || lengths[1] != 4 {
+		t.Fatalf("unexpected content lengths: %#v", lengths)
+	}
 	if len(progresses) < 2 || progresses[0] <= 0 || progresses[len(progresses)-1] != 8 {
 		t.Fatalf("unexpected progress updates: %#v", progresses)
 	}
@@ -111,7 +116,10 @@ func TestUploadFileLocalFlow(t *testing.T) {
 func TestUploadFileRemoteFlow(t *testing.T) {
 	t.Parallel()
 
-	var uploaded []string
+	var (
+		uploaded []string
+		lengths  []int64
+	)
 
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -136,6 +144,7 @@ func TestUploadFileRemoteFlow(t *testing.T) {
 			if got := r.Header.Get("Authorization"); got != "Bearer slave-token" {
 				t.Fatalf("unexpected slave auth: %q", got)
 			}
+			lengths = append(lengths, r.ContentLength)
 			body, _ := io.ReadAll(r.Body)
 			uploaded = append(uploaded, string(body))
 			w.WriteHeader(http.StatusOK)
@@ -152,6 +161,9 @@ func TestUploadFileRemoteFlow(t *testing.T) {
 
 	if len(uploaded) != 2 || uploaded[0] != "abc" || uploaded[1] != "de" {
 		t.Fatalf("unexpected remote chunks: %#v", uploaded)
+	}
+	if len(lengths) != 2 || lengths[0] != 3 || lengths[1] != 2 {
+		t.Fatalf("unexpected remote content lengths: %#v", lengths)
 	}
 }
 
@@ -248,6 +260,7 @@ func TestUploadFileS3Flow(t *testing.T) {
 
 	var (
 		putBodies      []string
+		partLengths    []int64
 		completeBody   string
 		callbackMethod string
 	)
@@ -270,6 +283,7 @@ func TestUploadFileS3Flow(t *testing.T) {
 				},
 			})
 		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/s3/part/"):
+			partLengths = append(partLengths, r.ContentLength)
 			body, _ := io.ReadAll(r.Body)
 			putBodies = append(putBodies, string(body))
 			w.Header().Set("ETag", `"`+r.URL.Path+`"`)
@@ -295,6 +309,9 @@ func TestUploadFileS3Flow(t *testing.T) {
 	if len(putBodies) != 2 || putBodies[0] != "abcd" || putBodies[1] != "efgh" {
 		t.Fatalf("unexpected s3 parts: %#v", putBodies)
 	}
+	if len(partLengths) != 2 || partLengths[0] != 4 || partLengths[1] != 4 {
+		t.Fatalf("unexpected s3 content lengths: %#v", partLengths)
+	}
 	if !strings.Contains(completeBody, "<PartNumber>1</PartNumber>") || !strings.Contains(completeBody, "<PartNumber>2</PartNumber>") {
 		t.Fatalf("unexpected complete body: %s", completeBody)
 	}
@@ -309,6 +326,7 @@ func TestUploadFileQiniuFlow(t *testing.T) {
 	var (
 		partAuth   []string
 		partBodies []string
+		partLens   []int64
 		finalBody  string
 	)
 
@@ -331,6 +349,7 @@ func TestUploadFileQiniuFlow(t *testing.T) {
 			})
 		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/qiniu/"):
 			partAuth = append(partAuth, r.Header.Get("Authorization"))
+			partLens = append(partLens, r.ContentLength)
 			body, _ := io.ReadAll(r.Body)
 			partBodies = append(partBodies, string(body))
 			_ = json.NewEncoder(w).Encode(map[string]any{"etag": "etag-" + r.URL.Path})
@@ -354,6 +373,9 @@ func TestUploadFileQiniuFlow(t *testing.T) {
 
 	if len(partBodies) != 2 || partBodies[0] != "abcd" || partBodies[1] != "efgh" {
 		t.Fatalf("unexpected qiniu parts: %#v", partBodies)
+	}
+	if len(partLens) != 2 || partLens[0] != 4 || partLens[1] != 4 {
+		t.Fatalf("unexpected qiniu content lengths: %#v", partLens)
 	}
 	for _, auth := range partAuth {
 		if auth != "UpToken up-token" {
@@ -427,6 +449,7 @@ func TestUploadFileOneDriveFlow(t *testing.T) {
 	var (
 		ranges   []string
 		uploaded []string
+		lengths  []int64
 	)
 
 	var srv *httptest.Server
@@ -447,6 +470,7 @@ func TestUploadFileOneDriveFlow(t *testing.T) {
 			})
 		case r.Method == http.MethodPut && r.URL.Path == "/onedrive/session":
 			ranges = append(ranges, r.Header.Get("Content-Range"))
+			lengths = append(lengths, r.ContentLength)
 			body, _ := io.ReadAll(r.Body)
 			uploaded = append(uploaded, string(body))
 			w.WriteHeader(http.StatusAccepted)
@@ -465,6 +489,9 @@ func TestUploadFileOneDriveFlow(t *testing.T) {
 
 	if len(ranges) != 2 || ranges[0] != "bytes 0-3/8" || ranges[1] != "bytes 4-7/8" {
 		t.Fatalf("unexpected ranges: %#v", ranges)
+	}
+	if len(lengths) != 2 || lengths[0] != 4 || lengths[1] != 4 {
+		t.Fatalf("unexpected onedrive content lengths: %#v", lengths)
 	}
 	if len(uploaded) != 2 || uploaded[0] != "abcd" || uploaded[1] != "efgh" {
 		t.Fatalf("unexpected onedrive chunks: %#v", uploaded)

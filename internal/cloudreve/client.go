@@ -230,6 +230,7 @@ func (c *Client) uploadLocalChunks(ctx context.Context, session uploadSession, c
 				"Content-Type":  "application/octet-stream",
 			},
 			expectAPIResponse: true,
+			contentLength:     int64(len(chunk)),
 		}); err != nil {
 			return err
 		}
@@ -255,6 +256,7 @@ func (c *Client) uploadRemoteChunks(ctx context.Context, session uploadSession, 
 				"Authorization": session.Credential,
 				"Content-Type":  "application/octet-stream",
 			},
+			contentLength: int64(len(chunk)),
 		}); err != nil {
 			return err
 		}
@@ -272,7 +274,7 @@ func (c *Client) uploadS3Like(ctx context.Context, session uploadSession, chunks
 	var uploaded int64
 	tracker := newUploadProgressTracker(total, progress)
 	for idx, chunk := range chunks {
-		etag, err := c.uploadRawChunk(ctx, session.UploadURLs[idx], tracker.Wrap(uploaded, bytes.NewReader(chunk)), nil)
+		etag, err := c.uploadRawChunk(ctx, session.UploadURLs[idx], tracker.Wrap(uploaded, bytes.NewReader(chunk)), int64(len(chunk)), nil)
 		if err != nil {
 			return err
 		}
@@ -311,7 +313,7 @@ func (c *Client) uploadOBS(ctx context.Context, session uploadSession, chunks []
 	var uploaded int64
 	tracker := newUploadProgressTracker(total, progress)
 	for idx, chunk := range chunks {
-		etag, err := c.uploadRawChunk(ctx, session.UploadURLs[idx], tracker.Wrap(uploaded, bytes.NewReader(chunk)), nil)
+		etag, err := c.uploadRawChunk(ctx, session.UploadURLs[idx], tracker.Wrap(uploaded, bytes.NewReader(chunk)), int64(len(chunk)), nil)
 		if err != nil {
 			return err
 		}
@@ -340,6 +342,7 @@ func (c *Client) uploadQiniu(ctx context.Context, session uploadSession, chunks 
 			headers: map[string]string{
 				"Authorization": "UpToken " + session.Credential,
 			},
+			contentLength: int64(len(chunk)),
 		})
 		if err != nil {
 			return err
@@ -430,6 +433,7 @@ func (c *Client) uploadOneDrive(ctx context.Context, session uploadSession, chun
 			headers: map[string]string{
 				"Content-Range": fmt.Sprintf("bytes %d-%d/%d", start, end, total),
 			},
+			contentLength: int64(len(chunk)),
 		}); err != nil {
 			return err
 		}
@@ -442,6 +446,7 @@ func (c *Client) uploadOneDrive(ctx context.Context, session uploadSession, chun
 type requestOptions struct {
 	headers           map[string]string
 	expectAPIResponse bool
+	contentLength     int64
 }
 
 func (c *Client) sendJSON(ctx context.Context, method, endpoint string, reqBody, respBody any) error {
@@ -494,8 +499,8 @@ func (c *Client) uploadRequest(ctx context.Context, method, target string, body 
 	return err
 }
 
-func (c *Client) uploadRawChunk(ctx context.Context, target string, body io.Reader, headers map[string]string) (string, error) {
-	resp, err := c.uploadRawChunkWithResponse(ctx, target, http.MethodPut, body, requestOptions{headers: headers})
+func (c *Client) uploadRawChunk(ctx context.Context, target string, body io.Reader, contentLength int64, headers map[string]string) (string, error) {
+	resp, err := c.uploadRawChunkWithResponse(ctx, target, http.MethodPut, body, requestOptions{headers: headers, contentLength: contentLength})
 	if err != nil {
 		return "", err
 	}
@@ -506,6 +511,9 @@ func (c *Client) uploadRawChunkWithResponse(ctx context.Context, target, method 
 	req, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
 		return nil, err
+	}
+	if opts.contentLength > 0 {
+		req.ContentLength = opts.contentLength
 	}
 	if _, ok := opts.headers["Content-Type"]; !ok && body != nil {
 		req.Header.Set("Content-Type", "application/octet-stream")
