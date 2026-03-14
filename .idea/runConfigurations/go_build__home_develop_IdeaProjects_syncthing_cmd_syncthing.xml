@@ -1,0 +1,12 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="go build /home/develop/IdeaProjects/syncthing/cmd/syncthing" type="GoApplicationRunConfiguration" factoryName="Go Application" nameIsGenerated="true">
+    <module name="syncthing" />
+    <working_directory value="$PROJECT_DIR$" />
+    <parameters value="--home=./test_config" />
+    <kind value="DIRECTORY" />
+    <package value="$PROJECT_DIR$/cmd/syncthing" />
+    <directory value="$PROJECT_DIR$/cmd/syncthing" />
+    <filePath value="$PROJECT_DIR$/cmd/syncthing/main.go" />
+    <method v="2" />
+  </configuration>
+</component>

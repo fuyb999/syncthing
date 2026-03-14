@@ -127,7 +127,45 @@
               <div class="form-group">
                 <label translate for="CloudreveToken">Cloudreve Token</label>
                 <input id="CloudreveToken" class="form-control" type="password" ng-model="tmpOptions.cloudreve.token" />
-                <p class="help-block" translate>Personal access token used for upload requests.</p>
+                <p class="help-block" translate>Personal access token used for upload requests. Optional if Cloudreve OAuth is configured and authorized.</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="row">
+            <div class="col-md-6">
+              <div class="form-group">
+                <label translate for="CloudreveOAuthClientID">Cloudreve OAuth Client ID</label>
+                <input id="CloudreveOAuthClientID" class="form-control" type="text" ng-model="tmpOptions.cloudreve.oauthClientID" />
+                <p class="help-block" translate>Client ID from the Cloudreve OAuth application.</p>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <div class="form-group">
+                <label translate for="CloudreveOAuthClientSecret">Cloudreve OAuth Client Secret</label>
+                <input id="CloudreveOAuthClientSecret" class="form-control" type="password" ng-model="tmpOptions.cloudreve.oauthClientSecret" />
+                <p class="help-block" translate>Client secret from the Cloudreve OAuth application.</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="row">
+            <div class="col-md-6">
+              <div class="form-group">
+                <label translate for="CloudreveOAuthScopes">Cloudreve OAuth Scopes</label>
+                <input id="CloudreveOAuthScopes" class="form-control" type="text" ng-model="tmpOptions.cloudreve.oauthScopes" placeholder="openid profile email offline_access Files.Read Files.Write" />
+                <p class="help-block" translate>Leave empty to use the recommended Cloudreve OAuth scopes.</p>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <div class="form-group">
+                <label translate for="CloudreveOAuthCallback">Cloudreve OAuth Callback URL</label>
+                <input id="CloudreveOAuthCallback" class="form-control" type="text" ng-value="cloudreveOAuthCallbackURI()" readonly />
+                <p class="help-block" translate>Register this callback URL in your Cloudreve OAuth application before logging in.</p>
+                <p class="help-block" translate>After saving the OAuth settings, log out and use “Sign in with Cloudreve” on the login page to authorize Syncthing.</p>
+                <p class="help-block" ng-if="cloudreveAuth.authorized" translate translate-value-user="{{cloudreveAuth.userName || cloudreveAuth.userEmail}}">
+                  Cloudreve OAuth is currently authorized as {%user%}.
+                </p>
               </div>
             </div>
           </div>

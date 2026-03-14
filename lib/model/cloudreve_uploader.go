@@ -19,6 +19,7 @@ import (
 	"github.com/thejerf/suture/v4"
 
 	"github.com/syncthing/syncthing/internal/cloudreve"
+	"github.com/syncthing/syncthing/internal/db"
 	"github.com/syncthing/syncthing/internal/slogutil"
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/events"
@@ -58,6 +59,7 @@ type cloudreveUploader struct {
 
 	mut     sync.Mutex
 	folders map[string]*cloudreveFolderState
+	oauth   *cloudreve.OAuthManager
 }
 
 type cloudreveFolderState struct {
@@ -95,7 +97,9 @@ func newCloudreveUploader(m *model) *cloudreveUploader {
 		model:      m,
 		ev:         m.evLogger,
 		folders:    make(map[string]*cloudreveFolderState),
+		oauth:      cloudreve.NewOAuthManager(m.cfg, db.NewMiscDB(m.sdb), nil),
 	}
+	u.Add(svcutil.AsService(u.oauth.Serve, "cloudreveUploader/oauth"))
 	u.Add(svcutil.AsService(u.listen, "cloudreveUploader/listen"))
 	return u
 }
@@ -240,8 +244,7 @@ func (u *cloudreveUploader) listen(ctx context.Context) error {
 			if !ok || cfg.Type != config.FolderTypeUploadOnly {
 				continue
 			}
-			cloudCfg := u.cloudreveConfig(cfg)
-			if !cloudCfg.IsReady() {
+			if !u.cloudreveEnabled(cfg) {
 				continue
 			}
 
@@ -250,6 +253,10 @@ func (u *cloudreveUploader) listen(ctx context.Context) error {
 			case "dir":
 				if payload["action"] == "deleted" {
 					u.handleDelete(ctx, cfg, relPath, true)
+					continue
+				}
+				cloudCfg, err := u.cloudreveConfig(ctx, cfg)
+				if err != nil || !cloudCfg.IsReady() {
 					continue
 				}
 				if err := cloudreve.NewClient(cloudCfg.Server, cloudCfg.Token, nil).EnsureFolder(ctx, cloudreve.JoinURI(u.cloudreveFolderRootURI(cfg, cloudCfg), relPath)); err != nil {
@@ -261,6 +268,10 @@ func (u *cloudreveUploader) listen(ctx context.Context) error {
 			case "file":
 				if payload["action"] == "deleted" {
 					u.handleDelete(ctx, cfg, relPath, false)
+					continue
+				}
+				cloudCfg, err := u.cloudreveConfig(ctx, cfg)
+				if err != nil || !cloudCfg.IsReady() {
 					continue
 				}
 				if u.enqueue(folderID, relPath, cloudCfg.WorkerCount) {
@@ -295,7 +306,12 @@ func (u *cloudreveUploader) processJob(ctx context.Context, job uploadJob, jobs 
 		u.removeFile(job.folder, job.path)
 		return
 	}
-	cloudCfg := u.cloudreveConfig(cfg)
+	cloudCfg, err := u.cloudreveConfig(ctx, cfg)
+	if err != nil {
+		u.removeFile(job.folder, job.path)
+		u.setFailure(job.folder, job.path, err)
+		return
+	}
 
 	state := u.folderState(job.folder, cloudCfg.WorkerCount)
 	select {
@@ -310,7 +326,7 @@ func (u *cloudreveUploader) processJob(ctx context.Context, job uploadJob, jobs 
 		return
 	}
 
-	err := u.uploadFile(uploadCtx, cfg, job.path)
+	err = u.uploadFile(uploadCtx, cfg, job.path)
 	requeue, deleteAfter, reportedErr := u.finishUpload(job.folder, job.path, err)
 	if reportedErr != nil {
 		slog.Warn("Cloudreve file upload failed", cfg.LogAttr(), slog.String("path", job.path), slogutil.Error(err))
@@ -340,7 +356,10 @@ func (u *cloudreveUploader) uploadFile(ctx context.Context, cfg config.FolderCon
 		return nil
 	}
 
-	cloudCfg := u.cloudreveConfig(cfg)
+	cloudCfg, err := u.cloudreveConfig(ctx, cfg)
+	if err != nil {
+		return err
+	}
 	client := cloudreve.NewClient(cloudCfg.Server, cloudCfg.Token, nil)
 	rootURI := u.cloudreveFolderRootURI(cfg, cloudCfg)
 	dirURI := cloudreve.JoinURI(rootURI, path.Dir(relPath))
@@ -369,15 +388,29 @@ func (u *cloudreveUploader) uploadFile(ctx context.Context, cfg config.FolderCon
 	return nil
 }
 
-func (u *cloudreveUploader) cloudreveConfig(folder config.FolderConfiguration) config.CloudreveConfiguration {
+func (u *cloudreveUploader) cloudreveConfig(ctx context.Context, folder config.FolderConfiguration) (config.CloudreveConfiguration, error) {
 	cloudCfg := u.model.cfg.Options().Cloudreve.Normalized()
+	if token, err := u.oauth.AccessToken(ctx); err == nil && token != "" {
+		cloudCfg.Token = token
+	}
 	if cloudCfg.IsReady() {
-		return cloudCfg
+		return cloudCfg, nil
 	}
 	if folder.Cloudreve.HasCredentials() {
-		return folder.Cloudreve.Normalized()
+		return folder.Cloudreve.Normalized(), nil
 	}
-	return cloudCfg
+	if u.cloudreveEnabled(folder) {
+		return cloudCfg, cloudreve.ErrOAuthNotAuthorized
+	}
+	return cloudCfg, nil
+}
+
+func (u *cloudreveUploader) cloudreveEnabled(folder config.FolderConfiguration) bool {
+	cloudCfg := u.model.cfg.Options().Cloudreve.Normalized()
+	if cloudCfg.Enabled && strings.TrimSpace(cloudCfg.Server) != "" && (strings.TrimSpace(cloudCfg.Token) != "" || cloudCfg.HasOAuthCredentials()) {
+		return true
+	}
+	return folder.Cloudreve.HasCredentials()
 }
 
 func (u *cloudreveUploader) cloudreveFolderRootURI(folder config.FolderConfiguration, cloudCfg config.CloudreveConfiguration) string {
@@ -557,7 +590,10 @@ func (u *cloudreveUploader) handleDelete(ctx context.Context, cfg config.FolderC
 }
 
 func (u *cloudreveUploader) deleteRemotePath(ctx context.Context, cfg config.FolderConfiguration, relPath string) error {
-	cloudCfg := u.cloudreveConfig(cfg)
+	cloudCfg, err := u.cloudreveConfig(ctx, cfg)
+	if err != nil {
+		return err
+	}
 	client := cloudreve.NewClient(cloudCfg.Server, cloudCfg.Token, nil)
 	return client.Delete(ctx, cloudreve.JoinURI(u.cloudreveFolderRootURI(cfg, cloudCfg), relPath))
 }

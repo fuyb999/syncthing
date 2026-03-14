@@ -12,23 +12,37 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	ldap "github.com/go-ldap/ldap/v3"
+	"github.com/syncthing/syncthing/internal/cloudreve"
+	"github.com/syncthing/syncthing/internal/db"
 	"github.com/syncthing/syncthing/internal/slogutil"
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/events"
+	libmodel "github.com/syncthing/syncthing/lib/model"
 	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/rand"
 )
 
 const (
-	maxSessionLifetime  = 7 * 24 * time.Hour
-	maxActiveSessions   = 25
-	randomTokenLength   = 64
-	maxLoginRequestSize = 1 << 10 // one kibibyte for username+password
+	maxSessionLifetime         = 7 * 24 * time.Hour
+	maxActiveSessions          = 25
+	randomTokenLength          = 64
+	maxLoginRequestSize        = 1 << 10 // one kibibyte for username+password
+	cloudreveStateCookieMaxAge = int((10 * time.Minute) / time.Second)
+	cloudreveAuthDetailMaxLen  = 512
+)
+
+const (
+	cloudreveAuthErrorDenied        = "denied"
+	cloudreveAuthErrorFailed        = "failed"
+	cloudreveAuthErrorNotConfigured = "notConfigured"
+	cloudreveAuthErrorStateExpired  = "stateExpired"
 )
 
 func emitLoginAttempt(success bool, username string, r *http.Request, evLogger events.Logger) {
@@ -129,15 +143,25 @@ type basicAuthAndSessionMiddleware struct {
 	tokenCookieManager *tokenCookieManager
 	guiCfg             config.GUIConfiguration
 	ldapCfg            config.LDAPConfiguration
+	model              libmodel.Model
+	cloudreveOAuth     *cloudreve.OAuthManager
+	cloudreveStateName string
+	cloudreveStayName  string
+	cloudrevePKCEName  string
 	next               http.Handler
 	evLogger           events.Logger
 }
 
-func newBasicAuthAndSessionMiddleware(tokenCookieManager *tokenCookieManager, guiCfg config.GUIConfiguration, ldapCfg config.LDAPConfiguration, next http.Handler, evLogger events.Logger) *basicAuthAndSessionMiddleware {
+func newBasicAuthAndSessionMiddleware(tokenCookieManager *tokenCookieManager, guiCfg config.GUIConfiguration, ldapCfg config.LDAPConfiguration, cfg config.Wrapper, miscDB *db.Typed, model libmodel.Model, next http.Handler, evLogger events.Logger) *basicAuthAndSessionMiddleware {
 	return &basicAuthAndSessionMiddleware{
 		tokenCookieManager: tokenCookieManager,
 		guiCfg:             guiCfg,
 		ldapCfg:            ldapCfg,
+		model:              model,
+		cloudreveOAuth:     cloudreve.NewOAuthManager(cfg, miscDB, nil),
+		cloudreveStateName: "cloudreve-auth-state-" + tokenCookieManager.shortID,
+		cloudreveStayName:  "cloudreve-auth-stay-" + tokenCookieManager.shortID,
+		cloudrevePKCEName:  "cloudreve-auth-pkce-" + tokenCookieManager.shortID,
 		next:               next,
 		evLogger:           evLogger,
 	}
@@ -226,6 +250,142 @@ func attemptBasicAuth(r *http.Request, guiCfg config.GUIConfiguration, ldapCfg c
 func (m *basicAuthAndSessionMiddleware) handleLogout(w http.ResponseWriter, r *http.Request) {
 	m.tokenCookieManager.destroySession(w, r)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (m *basicAuthAndSessionMiddleware) cloudreveAuthStatusHandler(w http.ResponseWriter, _ *http.Request) {
+	sendJSON(w, m.cloudreveOAuth.Status())
+}
+
+func (m *basicAuthAndSessionMiddleware) cloudreveAuthLoginHandler(w http.ResponseWriter, r *http.Request) {
+	stayLoggedIn, _ := strconv.ParseBool(r.URL.Query().Get("stayLoggedIn"))
+	state := rand.String(randomTokenLength)
+	codeVerifier := rand.String(randomTokenLength)
+	codeChallenge := cloudreve.PKCECodeChallenge(codeVerifier)
+
+	authURL, err := m.cloudreveOAuth.AuthorizationURL(r, state, codeChallenge)
+	if err != nil {
+		slog.Warn("Failed to start Cloudreve OAuth login", slogutil.Error(err))
+		m.redirectCloudreveAuthError(w, r, cloudreveAuthErrorNotConfigured, "")
+		return
+	}
+
+	m.setCookie(w, r, m.cloudreveStateName, state, cloudreveStateCookieMaxAge)
+	m.setCookie(w, r, m.cloudrevePKCEName, codeVerifier, cloudreveStateCookieMaxAge)
+	if stayLoggedIn {
+		m.setCookie(w, r, m.cloudreveStayName, "1", cloudreveStateCookieMaxAge)
+	} else {
+		m.setCookie(w, r, m.cloudreveStayName, "0", cloudreveStateCookieMaxAge)
+	}
+
+	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+func (m *basicAuthAndSessionMiddleware) cloudreveAuthCallbackHandler(w http.ResponseWriter, r *http.Request) {
+	defer m.clearCookie(w, r, m.cloudreveStateName)
+	defer m.clearCookie(w, r, m.cloudreveStayName)
+	defer m.clearCookie(w, r, m.cloudrevePKCEName)
+
+	if r.URL.Query().Get("error") != "" {
+		m.redirectCloudreveAuthError(w, r, cloudreveAuthErrorDenied, "")
+		return
+	}
+
+	state, ok := m.cookieValue(r, m.cloudreveStateName)
+	if !ok || state == "" || state != r.URL.Query().Get("state") {
+		m.redirectCloudreveAuthError(w, r, cloudreveAuthErrorStateExpired, "")
+		return
+	}
+
+	code := strings.TrimSpace(r.URL.Query().Get("code"))
+	if code == "" {
+		m.redirectCloudreveAuthError(w, r, cloudreveAuthErrorFailed, "")
+		return
+	}
+
+	codeVerifier, _ := m.cookieValue(r, m.cloudrevePKCEName)
+	session, err := m.cloudreveOAuth.ExchangeCode(r.Context(), code, cloudreve.RedirectURIForRequest(r), codeVerifier)
+	if err != nil {
+		slog.Warn("Cloudreve OAuth token exchange failed", slogutil.Error(err))
+		m.redirectCloudreveAuthError(w, r, cloudreveAuthErrorFailed, cloudreveAuthErrorDetail(err))
+		return
+	}
+
+	if m.guiCfg.IsAuthEnabled() && !m.tokenCookieManager.hasValidSession(r) {
+		stayLoggedIn, _ := m.cookieValue(r, m.cloudreveStayName)
+		m.tokenCookieManager.createSession(firstNonEmpty(session.UserName, session.UserEmail, session.UserSub, "cloudreve"), stayLoggedIn == "1", w, r)
+	}
+
+	if m.model != nil {
+		go m.model.ScanFolders()
+	}
+
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+func (m *basicAuthAndSessionMiddleware) redirectCloudreveAuthError(w http.ResponseWriter, r *http.Request, reason, detail string) {
+	query := url.Values{
+		"cloudreveAuthError": []string{reason},
+	}
+	if detail != "" {
+		query.Set("cloudreveAuthErrorDetail", detail)
+	}
+	http.Redirect(w, r, "/?"+query.Encode(), http.StatusFound)
+}
+
+func cloudreveAuthErrorDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	msg := strings.TrimSpace(err.Error())
+	msg = strings.TrimPrefix(msg, "cloudreve oauth request failed: ")
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return ""
+	}
+	if len(msg) > cloudreveAuthDetailMaxLen {
+		msg = msg[:cloudreveAuthDetailMaxLen-3] + "..."
+	}
+	return msg
+}
+
+func (m *basicAuthAndSessionMiddleware) cookieValue(r *http.Request, name string) (string, bool) {
+	cookie, err := r.Cookie(name)
+	if err != nil {
+		return "", false
+	}
+	return cookie.Value, true
+}
+
+func (m *basicAuthAndSessionMiddleware) setCookie(w http.ResponseWriter, r *http.Request, name, value string, maxAge int) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    value,
+		Path:     "/",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		Secure:   m.useSecureCookie(r),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (m *basicAuthAndSessionMiddleware) clearCookie(w http.ResponseWriter, r *http.Request, name string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   m.useSecureCookie(r),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (m *basicAuthAndSessionMiddleware) useSecureCookie(r *http.Request) bool {
+	connectionIsHTTPS := r.TLS != nil ||
+		strings.ToLower(r.Header.Get("X-Forwarded-Proto")) == "https" ||
+		strings.Contains(strings.ToLower(r.Header.Get("Forwarded")), "proto=https")
+	return connectionIsHTTPS || m.guiCfg.UseTLS()
 }
 
 func auth(username string, password string, guiCfg config.GUIConfiguration, ldapCfg config.LDAPConfiguration) bool {
@@ -341,6 +501,15 @@ func formatOptionalPercentS(template string, username string) string {
 		replacements = append(replacements, username)
 	}
 	return fmt.Sprintf(template, replacements...)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 // Convert an ISO-8859-1 encoded byte string to UTF-8. Works by the

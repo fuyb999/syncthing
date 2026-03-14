@@ -18,6 +18,9 @@ angular.module('syncthing.core')
             LocaleService.autoConfigLocale();
 
             if (!$scope.authenticated) {
+                applyCloudreveAuthError();
+                refreshCloudreveAuthStatus();
+
                 function setVersionFromHeader(_data, _status, headers) {
                     var version = headers('X-Syncthing-Version');
                     if (version) {
@@ -32,6 +35,7 @@ angular.module('syncthing.core')
             }
 
             setInterval($scope.refresh, 10000);
+            refreshCloudreveAuthStatus();
             startCloudreveTransferRateTimer();
             Events.start();
         }
@@ -45,6 +49,10 @@ angular.module('syncthing.core')
             username: '',
             password: '',
             errors: {},
+        };
+        $scope.cloudreveAuth = {
+            available: false,
+            authorized: false,
         };
         $scope.completion = {};
         $scope.config = {};
@@ -141,6 +149,14 @@ angular.module('syncthing.core')
             });
         };
 
+        $scope.authenticateCloudreve = function (stayLoggedIn) {
+            var persistent = stayLoggedIn;
+            if (persistent === undefined) {
+                persistent = !!$scope.login.stayLoggedIn;
+            }
+            window.location.href = authUrlbase + '/cloudreve/login?stayLoggedIn=' + (!!persistent);
+        };
+
         $scope.logout = function() {
             $http.post(authUrlbase + '/logout', {})
             .then(function () {
@@ -148,6 +164,10 @@ angular.module('syncthing.core')
             }).catch(function (response) {
                 console.log('Failed to log out:', response);
             });
+        };
+
+        $scope.cloudreveOAuthCallbackURI = function () {
+            return window.location.protocol + '//' + window.location.host + '/rest/noauth/auth/cloudreve/callback';
         };
 
         $(window).bind('beforeunload', function () {
@@ -931,6 +951,21 @@ angular.module('syncthing.core')
             }).error($scope.emitHTTPError);
         }
 
+        function refreshCloudreveAuthStatus() {
+            $http.get(authUrlbase + '/cloudreve/status').success(function (data) {
+                $scope.cloudreveAuth = data || {
+                    available: false,
+                    authorized: false,
+                };
+            }).error(function (response) {
+                $scope.cloudreveAuth = {
+                    available: false,
+                    authorized: false,
+                };
+                console.log('Failed to refresh Cloudreve OAuth status:', response);
+            });
+        }
+
         function refreshConfig() {
             return $q.all([
                 $http.get(urlbase + '/config').success(function (data) {
@@ -940,7 +975,37 @@ angular.module('syncthing.core')
                 $http.get(urlbase + '/config/insync').success(function (data) {
                     $scope.configInSync = data.configInSync;
                 }),
-            ]);
+            ]).then(function () {
+                refreshCloudreveAuthStatus();
+            });
+        }
+
+        function applyCloudreveAuthError() {
+            var reason = $location.search().cloudreveAuthError;
+            var detail = $location.search().cloudreveAuthErrorDetail;
+            if (!reason) {
+                return;
+            }
+            $scope.login.errors.cloudreveOAuth = cloudreveAuthErrorMessage(reason, detail);
+            $location.search('cloudreveAuthError', null);
+            $location.search('cloudreveAuthErrorDetail', null);
+            $location.replace();
+        }
+
+        function cloudreveAuthErrorMessage(reason, detail) {
+            switch (reason) {
+            case 'denied':
+                return $translate.instant('Cloudreve OAuth authorization was denied.');
+            case 'notConfigured':
+                return $translate.instant('Cloudreve OAuth is not configured yet.');
+            case 'stateExpired':
+                return $translate.instant('Cloudreve OAuth session expired. Please try again.');
+            default:
+                if (detail) {
+                    return $translate.instant('Cloudreve OAuth login failed. Please check Syncthing logs for details.') + ' (' + detail + ')';
+                }
+                return $translate.instant('Cloudreve OAuth login failed. Please check Syncthing logs for details.');
+            }
         }
 
         $scope.refreshNeed = function (page, perpage) {

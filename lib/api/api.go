@@ -369,10 +369,15 @@ func (s *service) Serve(ctx context.Context) error {
 	// Add our version and ID as a header to responses
 	handler = withDetailsMiddleware(s.id, handler)
 
+	tokenCookieManager := newTokenCookieManager(s.id.Short().String(), guiCfg, s.evLogger, s.miscDB)
+	authMW := newBasicAuthAndSessionMiddleware(tokenCookieManager, guiCfg, s.cfg.LDAP(), s.cfg, s.miscDB, s.model, handler, s.evLogger)
+
+	restMux.Handler(http.MethodGet, "/rest/noauth/auth/cloudreve/status", http.HandlerFunc(authMW.cloudreveAuthStatusHandler))
+	restMux.Handler(http.MethodGet, "/rest/noauth/auth/cloudreve/login", http.HandlerFunc(authMW.cloudreveAuthLoginHandler))
+	restMux.Handler(http.MethodGet, "/rest/noauth/auth/cloudreve/callback", http.HandlerFunc(authMW.cloudreveAuthCallbackHandler))
+
 	// Wrap everything in basic auth, if user/password is set.
 	if guiCfg.IsAuthEnabled() {
-		tokenCookieManager := newTokenCookieManager(s.id.Short().String(), guiCfg, s.evLogger, s.miscDB)
-		authMW := newBasicAuthAndSessionMiddleware(tokenCookieManager, guiCfg, s.cfg.LDAP(), handler, s.evLogger)
 		handler = authMW
 
 		restMux.Handler(http.MethodPost, "/rest/noauth/auth/password", http.HandlerFunc(authMW.passwordAuthHandler))

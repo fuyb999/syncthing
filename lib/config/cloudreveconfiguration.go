@@ -7,11 +7,14 @@
 package config
 
 type CloudreveConfiguration struct {
-	Enabled     bool   `json:"enabled" xml:"enabled"`
-	Server      string `json:"server" xml:"server"`
-	Token       string `json:"token" xml:"token"`
-	BaseURI     string `json:"baseURI" xml:"baseURI" default:"cloudreve://syncthing"`
-	WorkerCount int    `json:"workerCount" xml:"workerCount" default:"2"`
+	Enabled           bool   `json:"enabled" xml:"enabled"`
+	Server            string `json:"server" xml:"server"`
+	Token             string `json:"token" xml:"token"`
+	BaseURI           string `json:"baseURI" xml:"baseURI" default:"cloudreve://syncthing"`
+	WorkerCount       int    `json:"workerCount" xml:"workerCount" default:"2"`
+	OAuthClientID     string `json:"oauthClientID" xml:"oauthClientID"`
+	OAuthClientSecret string `json:"oauthClientSecret" xml:"oauthClientSecret"`
+	OAuthScopes       string `json:"oauthScopes" xml:"oauthScopes"`
 }
 
 func (c CloudreveConfiguration) Copy() CloudreveConfiguration {
@@ -23,7 +26,11 @@ func (c CloudreveConfiguration) IsReady() bool {
 }
 
 func (c CloudreveConfiguration) HasCredentials() bool {
-	return c.Enabled || c.Server != "" || c.Token != ""
+	return c.Enabled || c.Server != "" || c.Token != "" || c.OAuthClientID != "" || c.OAuthClientSecret != "" || c.OAuthScopes != ""
+}
+
+func (c CloudreveConfiguration) HasOAuthCredentials() bool {
+	return c.Enabled && c.Server != "" && c.OAuthClientID != "" && c.OAuthClientSecret != ""
 }
 
 func (c *CloudreveConfiguration) prepare() {
