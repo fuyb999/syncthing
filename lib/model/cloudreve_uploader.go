@@ -73,6 +73,8 @@ type cloudreveFileState struct {
 	Queued     bool
 	Uploading  bool
 	Retry      bool
+	Obsolete   bool
+	cancel     context.CancelFunc
 }
 
 type cloudreveEventData struct {
@@ -247,9 +249,10 @@ func (u *cloudreveUploader) listen(ctx context.Context) error {
 			switch payload["type"] {
 			case "dir":
 				if payload["action"] == "deleted" {
+					u.handleDelete(ctx, cfg, relPath, true)
 					continue
 				}
-				if err := cloudreve.NewClient(cloudCfg.Server, cloudCfg.Token, nil).EnsureFolder(ctx, cloudreve.JoinURI(cloudCfg.BaseURI, relPath)); err != nil {
+				if err := cloudreve.NewClient(cloudCfg.Server, cloudCfg.Token, nil).EnsureFolder(ctx, cloudreve.JoinURI(u.cloudreveFolderRootURI(cfg, cloudCfg), relPath)); err != nil {
 					u.setFailure(folderID, relPath, err)
 					slog.Warn("Cloudreve directory sync failed", cfg.LogAttr(), slog.String("path", relPath), slogutil.Error(err))
 				} else {
@@ -257,6 +260,7 @@ func (u *cloudreveUploader) listen(ctx context.Context) error {
 				}
 			case "file":
 				if payload["action"] == "deleted" {
+					u.handleDelete(ctx, cfg, relPath, false)
 					continue
 				}
 				if u.enqueue(folderID, relPath, cloudCfg.WorkerCount) {
@@ -301,19 +305,24 @@ func (u *cloudreveUploader) processJob(ctx context.Context, job uploadJob, jobs 
 	}
 	defer func() { <-state.workers }()
 
-	started := u.markUploading(job.folder, job.path)
+	uploadCtx, started := u.markUploading(ctx, job.folder, job.path)
 	if !started {
 		return
 	}
 
-	requeue, err := u.uploadFile(ctx, cfg, job.path)
-	if err != nil {
-		u.finishUpload(job.folder, job.path, true, err)
+	err := u.uploadFile(uploadCtx, cfg, job.path)
+	requeue, deleteAfter, reportedErr := u.finishUpload(job.folder, job.path, err)
+	if reportedErr != nil {
 		slog.Warn("Cloudreve file upload failed", cfg.LogAttr(), slog.String("path", job.path), slogutil.Error(err))
 		return
 	}
 
-	u.finishUpload(job.folder, job.path, false, nil)
+	if deleteAfter {
+		if err := u.deleteRemotePath(ctx, cfg, job.path); err != nil {
+			u.setFailure(job.folder, job.path, err)
+			slog.Warn("Cloudreve delete-after-upload failed", cfg.LogAttr(), slog.String("path", job.path), slogutil.Error(err))
+		}
+	}
 	if requeue {
 		select {
 		case jobs <- job:
@@ -322,41 +331,42 @@ func (u *cloudreveUploader) processJob(ctx context.Context, job uploadJob, jobs 
 	}
 }
 
-func (u *cloudreveUploader) uploadFile(ctx context.Context, cfg config.FolderConfiguration, relPath string) (bool, error) {
+func (u *cloudreveUploader) uploadFile(ctx context.Context, cfg config.FolderConfiguration, relPath string) error {
 	info, ok, err := u.model.sdb.GetDeviceFile(cfg.ID, protocol.LocalDeviceID, relPath)
 	if err != nil {
-		return false, err
+		return err
 	}
 	if !ok || info.IsDeleted() || info.IsDirectory() || info.IsSymlink() || info.IsInvalid() || len(info.Blocks) == 0 {
-		return false, nil
+		return nil
 	}
 
 	cloudCfg := u.cloudreveConfig(cfg)
 	client := cloudreve.NewClient(cloudCfg.Server, cloudCfg.Token, nil)
-	dirURI := cloudreve.JoinURI(cloudCfg.BaseURI, path.Dir(relPath))
+	rootURI := u.cloudreveFolderRootURI(cfg, cloudCfg)
+	dirURI := cloudreve.JoinURI(rootURI, path.Dir(relPath))
 	if err := client.EnsureFolder(ctx, dirURI); err != nil {
-		return false, err
+		return err
 	}
 
 	fd, err := cfg.Filesystem().Open(relPath)
 	if err != nil {
 		if fs.IsNotExist(err) {
-			return false, nil
+			return nil
 		}
-		return false, err
+		return err
 	}
 	defer fd.Close()
 
 	progress := func(done, total int64) {
 		u.updateProgress(cfg.ID, relPath, done, total)
 	}
-	uri := cloudreve.JoinURI(cloudCfg.BaseURI, relPath)
+	uri := cloudreve.JoinURI(rootURI, relPath)
 	mimeType := mime.TypeByExtension(path.Ext(relPath))
 	err = client.UploadFile(ctx, uri, info.Size, info.ModTime().UnixMilli(), mimeType, fd, progress)
 	if err != nil {
-		return false, err
+		return err
 	}
-	return u.markUploadedAndCheckRetry(cfg.ID, relPath), nil
+	return nil
 }
 
 func (u *cloudreveUploader) cloudreveConfig(folder config.FolderConfiguration) config.CloudreveConfiguration {
@@ -368,6 +378,17 @@ func (u *cloudreveUploader) cloudreveConfig(folder config.FolderConfiguration) c
 		return folder.Cloudreve.Normalized()
 	}
 	return cloudCfg
+}
+
+func (u *cloudreveUploader) cloudreveFolderRootURI(folder config.FolderConfiguration, cloudCfg config.CloudreveConfiguration) string {
+	name := strings.TrimSpace(folder.Label)
+	if name == "" {
+		name = strings.TrimSpace(folder.ID)
+	}
+	if name == "" {
+		name = "folder"
+	}
+	return cloudreve.JoinURI(cloudCfg.BaseURI, name)
 }
 
 func (u *cloudreveUploader) folderState(folder string, workerCount int) *cloudreveFolderState {
@@ -427,23 +448,26 @@ func (u *cloudreveUploader) enqueue(folder, relPath string, workerCount int) boo
 	return true
 }
 
-func (u *cloudreveUploader) markUploading(folder, relPath string) bool {
+func (u *cloudreveUploader) markUploading(parentCtx context.Context, folder, relPath string) (context.Context, bool) {
 	u.mut.Lock()
 	defer u.mut.Unlock()
 
 	state, ok := u.folders[folder]
 	if !ok {
-		return false
+		return nil, false
 	}
 	file, ok := state.files[relPath]
 	if !ok || !file.Queued {
-		return false
+		return nil, false
 	}
 	file.Queued = false
 	file.Uploading = true
 	file.BytesDone = 0
+	file.Obsolete = false
+	uploadCtx, cancel := context.WithCancel(parentCtx)
+	file.cancel = cancel
 	u.emitProgress(folder)
-	return true
+	return uploadCtx, true
 }
 
 func (u *cloudreveUploader) updateProgress(folder, relPath string, done, total int64) {
@@ -463,50 +487,140 @@ func (u *cloudreveUploader) updateProgress(folder, relPath string, done, total i
 	u.emitProgress(folder)
 }
 
-func (u *cloudreveUploader) markUploadedAndCheckRetry(folder, relPath string) bool {
+func (u *cloudreveUploader) finishUpload(folder, relPath string, err error) (bool, bool, error) {
 	u.mut.Lock()
 	defer u.mut.Unlock()
 
 	state, ok := u.folders[folder]
 	if !ok {
-		return false
+		if err != nil {
+			return false, false, err
+		}
+		return false, false, nil
 	}
 	file, ok := state.files[relPath]
 	if !ok {
-		return false
-	}
-	retry := file.Retry
-	file.Retry = false
-	if retry {
-		file.Queued = true
-		file.Uploading = false
-		file.BytesDone = 0
-	}
-	u.emitProgress(folder)
-	return retry
-}
-
-func (u *cloudreveUploader) finishUpload(folder, relPath string, failed bool, err error) {
-	u.mut.Lock()
-	defer u.mut.Unlock()
-
-	state, ok := u.folders[folder]
-	if !ok {
-		return
-	}
-	file, ok := state.files[relPath]
-	if !ok {
-		return
+		if err != nil {
+			return false, false, err
+		}
+		return false, false, nil
 	}
 	file.Uploading = false
-	if failed {
+	file.cancel = nil
+	requeue := file.Retry
+	file.Retry = false
+
+	if file.Obsolete {
+		deleteAfter := err == nil && !requeue
+		if requeue {
+			file.Queued = true
+			file.Obsolete = false
+			file.BytesDone = 0
+			delete(state.failed, relPath)
+		} else {
+			delete(state.files, relPath)
+			delete(state.failed, relPath)
+		}
+		u.emitProgress(folder)
+		u.emitErrorsLocked(folder)
+		return requeue, deleteAfter, nil
+	}
+
+	if err != nil {
 		state.failed[relPath] = FileError{Path: relPath, Err: err.Error()}
-	} else if !file.Queued {
+		u.emitProgress(folder)
+		u.emitErrorsLocked(folder)
+		return false, false, err
+	}
+
+	if requeue {
+		file.Queued = true
+		file.BytesDone = 0
+		delete(state.failed, relPath)
+	} else {
 		delete(state.files, relPath)
 		delete(state.failed, relPath)
 	}
 	u.emitProgress(folder)
 	u.emitErrorsLocked(folder)
+	return requeue, false, nil
+}
+
+func (u *cloudreveUploader) handleDelete(ctx context.Context, cfg config.FolderConfiguration, relPath string, recursive bool) {
+	u.obsoletePath(cfg.ID, relPath, recursive)
+	if err := u.deleteRemotePath(ctx, cfg, relPath); err != nil {
+		u.setFailure(cfg.ID, relPath, err)
+		slog.Warn("Cloudreve delete sync failed", cfg.LogAttr(), slog.String("path", relPath), slogutil.Error(err))
+		return
+	}
+	u.clearFailuresMatching(cfg.ID, relPath, recursive)
+}
+
+func (u *cloudreveUploader) deleteRemotePath(ctx context.Context, cfg config.FolderConfiguration, relPath string) error {
+	cloudCfg := u.cloudreveConfig(cfg)
+	client := cloudreve.NewClient(cloudCfg.Server, cloudCfg.Token, nil)
+	return client.Delete(ctx, cloudreve.JoinURI(u.cloudreveFolderRootURI(cfg, cloudCfg), relPath))
+}
+
+func (u *cloudreveUploader) obsoletePath(folder, relPath string, recursive bool) {
+	var cancels []context.CancelFunc
+
+	u.mut.Lock()
+	state, ok := u.folders[folder]
+	if ok {
+		for path, file := range state.files {
+			if !matchesCloudrevePath(path, relPath, recursive) {
+				continue
+			}
+			delete(state.failed, path)
+			if file.Uploading {
+				file.Obsolete = true
+				if file.cancel != nil {
+					cancels = append(cancels, file.cancel)
+					file.cancel = nil
+				}
+				continue
+			}
+			delete(state.files, path)
+		}
+		u.emitProgress(folder)
+		u.emitErrorsLocked(folder)
+	}
+	u.mut.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (u *cloudreveUploader) clearFailuresMatching(folder, relPath string, recursive bool) {
+	u.mut.Lock()
+	defer u.mut.Unlock()
+
+	state, ok := u.folders[folder]
+	if !ok {
+		return
+	}
+	for path := range state.failed {
+		if matchesCloudrevePath(path, relPath, recursive) {
+			delete(state.failed, path)
+		}
+	}
+	u.emitErrorsLocked(folder)
+}
+
+func matchesCloudrevePath(candidate, target string, recursive bool) bool {
+	if candidate == target {
+		return true
+	}
+	if !recursive {
+		return false
+	}
+	target = strings.TrimSuffix(target, "/")
+	if target == "" {
+		return true
+	}
+	return strings.HasPrefix(candidate, target+"/")
 }
 
 func (u *cloudreveUploader) setFailure(folder, relPath string, err error) {

@@ -381,6 +381,54 @@ func TestMigrateLegacyCloudreveToOptions(t *testing.T) {
 	}
 }
 
+func TestCloudreveStandaloneModeDisablesListenersAndDiscovery(t *testing.T) {
+	cfg, err := ReadJSON(strings.NewReader(`{
+		"version": 51,
+		"folders": [],
+		"devices": [],
+		"options": {
+			"listenAddresses": ["default"],
+			"globalAnnounceServers": ["default"],
+			"globalAnnounceEnabled": true,
+			"localAnnounceEnabled": true,
+			"relaysEnabled": true,
+			"natEnabled": true,
+			"announceLANAddresses": true,
+			"cloudreve": {
+				"enabled": true,
+				"server": "https://cloudreve.example.com",
+				"token": "secret"
+			}
+		}
+	}`), device1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := cfg.Options
+	if diff, equal := messagediff.PrettyDiff([]string{""}, opts.RawListenAddresses); !equal {
+		t.Fatalf("unexpected listen addresses after cloudreve standalone mode:\n%s", diff)
+	}
+	if len(opts.RawGlobalAnnServers) != 0 {
+		t.Fatalf("expected no global discovery servers, got %#v", opts.RawGlobalAnnServers)
+	}
+	if opts.GlobalAnnEnabled {
+		t.Fatal("expected global discovery to be disabled")
+	}
+	if opts.LocalAnnEnabled {
+		t.Fatal("expected local discovery to be disabled")
+	}
+	if opts.RelaysEnabled {
+		t.Fatal("expected relays to be disabled")
+	}
+	if opts.NATEnabled {
+		t.Fatal("expected nat traversal to be disabled")
+	}
+	if opts.AnnounceLANAddresses {
+		t.Fatal("expected lan address announcements to be disabled")
+	}
+}
+
 func TestDeviceAddressesDynamic(t *testing.T) {
 	name, _ := os.Hostname()
 	expected := map[protocol.DeviceID]DeviceConfiguration{

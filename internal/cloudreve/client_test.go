@@ -9,6 +9,7 @@ package cloudreve
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime"
 	"net/http"
@@ -16,6 +17,20 @@ import (
 	"strings"
 	"testing"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+func newJSONResponse(status int, payload string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(payload)),
+	}
+}
 
 func TestJoinURI(t *testing.T) {
 	t.Parallel()
@@ -88,7 +103,7 @@ func TestUploadFileLocalFlow(t *testing.T) {
 	if len(chunks) != 2 || chunks[0] != "abcd" || chunks[1] != "efgh" {
 		t.Fatalf("unexpected chunks: %#v", chunks)
 	}
-	if len(progresses) != 2 || progresses[0] != 4 || progresses[1] != 8 {
+	if len(progresses) < 2 || progresses[0] <= 0 || progresses[len(progresses)-1] != 8 {
 		t.Fatalf("unexpected progress updates: %#v", progresses)
 	}
 }
@@ -137,6 +152,94 @@ func TestUploadFileRemoteFlow(t *testing.T) {
 
 	if len(uploaded) != 2 || uploaded[0] != "abc" || uploaded[1] != "de" {
 		t.Fatalf("unexpected remote chunks: %#v", uploaded)
+	}
+}
+
+func TestDeleteFile(t *testing.T) {
+	t.Parallel()
+
+	var (
+		method string
+		body   map[string]any
+	)
+
+	client := NewClient("https://cloudreve.example", "token", &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.URL.Path != "/api/v4/file" {
+				t.Fatalf("unexpected path: %s", r.URL.Path)
+			}
+			method = r.Method
+			if got := r.Header.Get("Authorization"); got != "Bearer token" {
+				t.Fatalf("unexpected auth header: %q", got)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			return newJSONResponse(http.StatusOK, `{"code":0,"data":null}`), nil
+		}),
+	})
+	if err := client.Delete(context.Background(), "cloudreve://root/file.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	if method != http.MethodDelete {
+		t.Fatalf("expected DELETE request, got %q", method)
+	}
+	uris, ok := body["uris"].([]any)
+	if !ok || len(uris) != 1 || uris[0] != "cloudreve://root/file.txt" {
+		t.Fatalf("unexpected uris: %#v", body["uris"])
+	}
+	if body["skip_soft_delete"] != true {
+		t.Fatal("expected skip_soft_delete to be true")
+	}
+	if body["unlink"] == true {
+		t.Fatal("expected unlink to be false")
+	}
+}
+
+func TestDeleteFileIgnoresNotFound(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient("https://cloudreve.example", "token", &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.URL.Path != "/api/v4/file" {
+				t.Fatalf("unexpected path: %s", r.URL.Path)
+			}
+			return newJSONResponse(http.StatusOK, `{"code":404,"msg":"file not found","data":null}`), nil
+		}),
+	})
+	if err := client.Delete(context.Background(), "cloudreve://root/missing.txt"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUploadProgressTrackerReportsIncrementally(t *testing.T) {
+	t.Parallel()
+
+	var samples []int64
+	tracker := newUploadProgressTracker(10, func(done, _ int64) {
+		samples = append(samples, done)
+	})
+	reader := tracker.Wrap(3, strings.NewReader("abcdefg"))
+	buf := make([]byte, 2)
+	for {
+		_, err := reader.Read(buf)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if len(samples) == 0 {
+		t.Fatal("expected progress samples")
+	}
+	if samples[0] <= 3 {
+		t.Fatalf("expected incremental progress above base offset, got %#v", samples)
+	}
+	if samples[len(samples)-1] != 10 {
+		t.Fatalf("expected final progress to reach total size, got %#v", samples)
 	}
 }
 

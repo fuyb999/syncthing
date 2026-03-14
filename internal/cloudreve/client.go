@@ -21,9 +21,12 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var ErrUnsupportedUploadTarget = errors.New("cloudreve returned an unsupported upload target")
+
+const uploadProgressInterval = 500 * time.Millisecond
 
 type Client struct {
 	baseURL    string
@@ -71,6 +74,12 @@ type createFileRequest struct {
 	ErrOnConflict bool   `json:"err_on_conflict"`
 }
 
+type deleteFileRequest struct {
+	Uris           []string `json:"uris"`
+	Unlink         bool     `json:"unlink"`
+	SkipSoftDelete bool     `json:"skip_soft_delete"`
+}
+
 type qiniuChunkResponse struct {
 	ETag string `json:"etag"`
 }
@@ -95,6 +104,20 @@ type completePartElement struct {
 	ETag       string `xml:"ETag"`
 }
 
+type uploadProgressTracker struct {
+	total          int64
+	progress       func(done, total int64)
+	lastReported   int64
+	lastReportedAt time.Time
+}
+
+type uploadProgressReader struct {
+	reader  io.Reader
+	tracker *uploadProgressTracker
+	base    int64
+	done    int64
+}
+
 func NewClient(server, token string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -115,6 +138,29 @@ func (c *Client) EnsureFolder(ctx context.Context, uri string) error {
 		Type:          "folder",
 		ErrOnConflict: false,
 	}, nil)
+}
+
+func (c *Client) Delete(ctx context.Context, uris ...string) error {
+	filtered := make([]string, 0, len(uris))
+	for _, uri := range uris {
+		uri = strings.TrimSpace(uri)
+		if uri == "" || uri == "cloudreve://" {
+			continue
+		}
+		filtered = append(filtered, uri)
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+
+	err := c.sendJSON(ctx, http.MethodDelete, "/api/v4/file", deleteFileRequest{
+		Uris:           filtered,
+		SkipSoftDelete: true,
+	}, nil)
+	if isNotFoundDeleteError(err) {
+		return nil
+	}
+	return err
 }
 
 func (c *Client) UploadFile(ctx context.Context, uri string, size int64, lastModified int64, mimeType string, src io.Reader, progress func(done, total int64)) error {
@@ -176,8 +222,9 @@ func (c *Client) createUploadSession(ctx context.Context, uri string, size int64
 
 func (c *Client) uploadLocalChunks(ctx context.Context, session uploadSession, chunks [][]byte, total int64, progress func(done, total int64)) error {
 	var uploaded int64
+	tracker := newUploadProgressTracker(total, progress)
 	for idx, chunk := range chunks {
-		if err := c.uploadRequest(ctx, http.MethodPost, c.baseURL+"/api/v4/file/upload/"+session.SessionID+"/"+strconv.Itoa(idx), bytes.NewReader(chunk), requestOptions{
+		if err := c.uploadRequest(ctx, http.MethodPost, c.baseURL+"/api/v4/file/upload/"+session.SessionID+"/"+strconv.Itoa(idx), tracker.Wrap(uploaded, bytes.NewReader(chunk)), requestOptions{
 			headers: map[string]string{
 				"Authorization": "Bearer " + c.token,
 				"Content-Type":  "application/octet-stream",
@@ -187,7 +234,7 @@ func (c *Client) uploadLocalChunks(ctx context.Context, session uploadSession, c
 			return err
 		}
 		uploaded += int64(len(chunk))
-		reportProgress(progress, uploaded, total)
+		tracker.Report(uploaded, true)
 	}
 	return nil
 }
@@ -197,12 +244,13 @@ func (c *Client) uploadRemoteChunks(ctx context.Context, session uploadSession, 
 		return ErrUnsupportedUploadTarget
 	}
 	var uploaded int64
+	tracker := newUploadProgressTracker(total, progress)
 	for idx, chunk := range chunks {
 		target, err := addQuery(session.UploadURLs[0], "chunk", strconv.Itoa(idx))
 		if err != nil {
 			return err
 		}
-		if err := c.uploadRequest(ctx, http.MethodPost, target, bytes.NewReader(chunk), requestOptions{
+		if err := c.uploadRequest(ctx, http.MethodPost, target, tracker.Wrap(uploaded, bytes.NewReader(chunk)), requestOptions{
 			headers: map[string]string{
 				"Authorization": session.Credential,
 				"Content-Type":  "application/octet-stream",
@@ -211,7 +259,7 @@ func (c *Client) uploadRemoteChunks(ctx context.Context, session uploadSession, 
 			return err
 		}
 		uploaded += int64(len(chunk))
-		reportProgress(progress, uploaded, total)
+		tracker.Report(uploaded, true)
 	}
 	return nil
 }
@@ -222,8 +270,9 @@ func (c *Client) uploadS3Like(ctx context.Context, session uploadSession, chunks
 	}
 	parts := make([]completePartElement, 0, len(chunks))
 	var uploaded int64
+	tracker := newUploadProgressTracker(total, progress)
 	for idx, chunk := range chunks {
-		etag, err := c.uploadRawChunk(ctx, session.UploadURLs[idx], bytes.NewReader(chunk), nil)
+		etag, err := c.uploadRawChunk(ctx, session.UploadURLs[idx], tracker.Wrap(uploaded, bytes.NewReader(chunk)), nil)
 		if err != nil {
 			return err
 		}
@@ -231,7 +280,7 @@ func (c *Client) uploadS3Like(ctx context.Context, session uploadSession, chunks
 			parts = append(parts, completePartElement{PartNumber: idx + 1, ETag: etag})
 		}
 		uploaded += int64(len(chunk))
-		reportProgress(progress, uploaded, total)
+		tracker.Report(uploaded, true)
 	}
 
 	var body []byte
@@ -260,14 +309,15 @@ func (c *Client) uploadOBS(ctx context.Context, session uploadSession, chunks []
 	}
 	parts := make([]completePartElement, 0, len(chunks))
 	var uploaded int64
+	tracker := newUploadProgressTracker(total, progress)
 	for idx, chunk := range chunks {
-		etag, err := c.uploadRawChunk(ctx, session.UploadURLs[idx], bytes.NewReader(chunk), nil)
+		etag, err := c.uploadRawChunk(ctx, session.UploadURLs[idx], tracker.Wrap(uploaded, bytes.NewReader(chunk)), nil)
 		if err != nil {
 			return err
 		}
 		parts = append(parts, completePartElement{PartNumber: idx + 1, ETag: etag})
 		uploaded += int64(len(chunk))
-		reportProgress(progress, uploaded, total)
+		tracker.Report(uploaded, true)
 	}
 	payload, err := xml.Marshal(completeMultipartUpload{Parts: parts})
 	if err != nil {
@@ -283,9 +333,10 @@ func (c *Client) uploadQiniu(ctx context.Context, session uploadSession, chunks 
 	}
 	parts := make([]qiniuPartInfo, 0, len(chunks))
 	var uploaded int64
+	tracker := newUploadProgressTracker(total, progress)
 	for idx, chunk := range chunks {
 		target := strings.TrimRight(session.UploadURLs[0], "/") + "/" + strconv.Itoa(idx+1)
-		body, err := c.uploadRawChunkWithResponse(ctx, target, http.MethodPut, bytes.NewReader(chunk), requestOptions{
+		body, err := c.uploadRawChunkWithResponse(ctx, target, http.MethodPut, tracker.Wrap(uploaded, bytes.NewReader(chunk)), requestOptions{
 			headers: map[string]string{
 				"Authorization": "UpToken " + session.Credential,
 			},
@@ -299,7 +350,7 @@ func (c *Client) uploadQiniu(ctx context.Context, session uploadSession, chunks 
 		}
 		parts = append(parts, qiniuPartInfo{ETag: resp.ETag, PartNumber: idx + 1})
 		uploaded += int64(len(chunk))
-		reportProgress(progress, uploaded, total)
+		tracker.Report(uploaded, true)
 	}
 
 	payload, err := json.Marshal(qiniuCompleteRequest{
@@ -371,10 +422,11 @@ func (c *Client) uploadOneDrive(ctx context.Context, session uploadSession, chun
 		return fmt.Errorf("%w: %q", ErrUnsupportedUploadTarget, "onedrive empty file")
 	}
 	var uploaded int64
+	tracker := newUploadProgressTracker(total, progress)
 	for _, chunk := range chunks {
 		start := uploaded
 		end := uploaded + int64(len(chunk)) - 1
-		if _, err := c.uploadRawChunkWithResponse(ctx, session.UploadURLs[0], http.MethodPut, bytes.NewReader(chunk), requestOptions{
+		if _, err := c.uploadRawChunkWithResponse(ctx, session.UploadURLs[0], http.MethodPut, tracker.Wrap(uploaded, bytes.NewReader(chunk)), requestOptions{
 			headers: map[string]string{
 				"Content-Range": fmt.Sprintf("bytes %d-%d/%d", start, end, total),
 			},
@@ -382,7 +434,7 @@ func (c *Client) uploadOneDrive(ctx context.Context, session uploadSession, chun
 			return err
 		}
 		uploaded += int64(len(chunk))
-		reportProgress(progress, uploaded, total)
+		tracker.Report(uploaded, true)
 	}
 	return c.sendAPIRequest(ctx, http.MethodPost, c.baseURL+"/api/v4/callback/onedrive/"+session.SessionID+"/"+session.CallbackSecret, nil, nil)
 }
@@ -542,6 +594,73 @@ func reportProgress(progress func(done, total int64), done, total int64) {
 	if progress != nil {
 		progress(done, total)
 	}
+}
+
+func newUploadProgressTracker(total int64, progress func(done, total int64)) *uploadProgressTracker {
+	if progress == nil {
+		return nil
+	}
+	return &uploadProgressTracker{
+		total:    total,
+		progress: progress,
+	}
+}
+
+func (t *uploadProgressTracker) Wrap(base int64, body io.Reader) io.Reader {
+	if t == nil || body == nil {
+		return body
+	}
+	return &uploadProgressReader{
+		reader:  body,
+		tracker: t,
+		base:    base,
+	}
+}
+
+func (t *uploadProgressTracker) Report(done int64, force bool) {
+	if t == nil || t.progress == nil {
+		return
+	}
+	if done < 0 {
+		done = 0
+	}
+	if done > t.total {
+		done = t.total
+	}
+	if done == t.lastReported && !t.lastReportedAt.IsZero() {
+		return
+	}
+	now := time.Now()
+	if !force && !t.lastReportedAt.IsZero() && now.Sub(t.lastReportedAt) < uploadProgressInterval {
+		return
+	}
+	t.lastReported = done
+	t.lastReportedAt = now
+	reportProgress(t.progress, done, t.total)
+}
+
+func (r *uploadProgressReader) Read(buf []byte) (int, error) {
+	n, err := r.reader.Read(buf)
+	if n > 0 {
+		r.done += int64(n)
+		r.tracker.Report(r.base+r.done, false)
+	}
+	if errors.Is(err, io.EOF) {
+		r.tracker.Report(r.base+r.done, true)
+	}
+	return n, err
+}
+
+func isNotFoundDeleteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "cloudreve api error 404:") ||
+		strings.Contains(msg, "cloudreve api error 40016:") ||
+		strings.Contains(msg, "cloudreve api error 40077:") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "not exist")
 }
 
 func (s uploadSession) policyType() string {

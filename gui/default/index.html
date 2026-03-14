@@ -691,8 +691,7 @@
                       <th><span class="fas fa-fw fa-cloud-download-alt"></span>&nbsp;<span translate>Download Rate</span></th>
                       <td class="text-right">
                         <a href="#" class="toggler" ng-click="toggleUnits()">
-                          <span ng-if="!metricRates">{{connectionsTotal.inbps | binary}}B/s</span>
-                          <span ng-if="metricRates">{{connectionsTotal.inbps*8 | metric}}bps</span>
+                          <span>{{rateText(thisDeviceDownloadRate())}}</span>
                           ({{connectionsTotal.inBytesTotal | binary}}B)
                           <small ng-if="config.options.maxRecvKbps > 0"><br/>
                             <i class="text-muted"><span translate>Limit</span>:
@@ -710,9 +709,13 @@
                       <th><span class="fas fa-fw fa-cloud-upload-alt"></span>&nbsp;<span translate>Upload Rate</span></th>
                       <td class="text-right">
                         <a href="#" class="toggler" ng-click="toggleUnits()">
-                          <span ng-if="!metricRates">{{connectionsTotal.outbps | binary}}B/s</span>
-                          <span ng-if="metricRates">{{connectionsTotal.outbps*8 | metric}}bps</span>
+                          <span>{{rateText(thisDeviceUploadRate())}}</span>
                           ({{connectionsTotal.outBytesTotal | binary}}B)
+                          <small ng-if="cloudreveUploadRate() > 0"><br/>
+                            <i class="text-muted">
+                              <span translate>Cloudreve Upload</span>: {{rateText(cloudreveUploadRate())}}
+                            </i>
+                          </small>
                           <small ng-if="config.options.maxSendKbps > 0"><br/>
                             <i class="text-muted"><span translate>Limit</span>:
                               <span ng-if="!metricRates">{{config.options.maxSendKbps*1024 | binary}}B/s</span>

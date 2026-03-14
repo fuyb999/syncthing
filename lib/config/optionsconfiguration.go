@@ -148,6 +148,21 @@ func (opts *OptionsConfiguration) prepare(guiPWIsSet bool) {
 	}
 
 	opts.Cloudreve.prepare()
+	opts.applyCloudreveStandaloneMode()
+}
+
+func (opts *OptionsConfiguration) applyCloudreveStandaloneMode() {
+	if !opts.Cloudreve.Enabled {
+		return
+	}
+
+	opts.RawListenAddresses = []string{""}
+	opts.RawGlobalAnnServers = []string{}
+	opts.GlobalAnnEnabled = false
+	opts.LocalAnnEnabled = false
+	opts.RelaysEnabled = false
+	opts.NATEnabled = false
+	opts.AnnounceLANAddresses = false
 }
 
 // RequiresRestartOnly returns a copy with only the attributes that require

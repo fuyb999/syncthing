@@ -8,6 +8,8 @@ angular.module('syncthing.core')
         // private/helper definitions
 
         var prevDate = 0;
+        var cloudreveRateTimer = null;
+        var cloudreveRateIntervalMs = 1000;
         var navigatingAway = false;
         var online = false;
         var restarting = false;
@@ -30,6 +32,7 @@ angular.module('syncthing.core')
             }
 
             setInterval($scope.refresh, 10000);
+            startCloudreveTransferRateTimer();
             Events.start();
         }
 
@@ -71,6 +74,16 @@ angular.module('syncthing.core')
         $scope.uploads = {};
         $scope.localChanged = {};
         $scope.scanProgress = {};
+        $scope.folderTransferRates = {};
+        $scope.cloudreveTransfer = {
+            byFolder: {},
+            outBytesTotal: 0,
+            outbps: 0,
+            lastOutBytesTotal: 0,
+            lastRateAt: 0,
+            lastActiveAt: 0,
+            active: false,
+        };
         $scope.themes = [];
         $scope.globalChangeEvents = {};
         $scope.metricRates = false;
@@ -143,6 +156,13 @@ angular.module('syncthing.core')
 
         $scope.$on("$locationChangeSuccess", function () {
             LocaleService.useLocale($location.search().lang);
+        });
+
+        $scope.$on('$destroy', function () {
+            if (cloudreveRateTimer) {
+                $timeout.cancel(cloudreveRateTimer);
+                cloudreveRateTimer = null;
+            }
         });
 
         $scope.needActions = {
@@ -439,15 +459,109 @@ angular.module('syncthing.core')
                 }
             }
             $scope.progress = progress;
+            updateCloudreveTransfer(stats);
             if ($scope.uploads && $scope.uploads.folder) {
                 $scope.refreshUploadStatus($scope.uploads.page || 1, $scope.uploads.perpage || 10);
             }
             console.log("DownloadProgress", $scope.progress);
         });
 
+        function updateCloudreveTransfer(stats) {
+            var transfer = $scope.cloudreveTransfer;
+            var nextByFolder = {};
+            var outBytesDelta = 0;
+            var active = false;
+            var now = Date.now();
+
+            for (var folder in stats) {
+                if (!$scope.folders[folder] || $scope.folders[folder].type !== 'uploadonly') {
+                    continue;
+                }
+
+                var bytesDone = 0;
+                for (var file in stats[folder]) {
+                    var entry = stats[folder][file];
+                    bytesDone += entry.bytesDone || 0;
+                    if ((entry.pulling || 0) > 0) {
+                        active = true;
+                    }
+                }
+
+                var previous = transfer.byFolder[folder] || 0;
+                if (bytesDone > previous) {
+                    outBytesDelta += bytesDone - previous;
+                }
+                nextByFolder[folder] = bytesDone;
+            }
+
+            if (!active) {
+                for (var modelFolder in $scope.model) {
+                    if (!$scope.folders[modelFolder] || $scope.folders[modelFolder].type !== 'uploadonly') {
+                        continue;
+                    }
+                    if (($scope.model[modelFolder].uploadingItems || 0) > 0) {
+                        active = true;
+                        break;
+                    }
+                }
+            }
+
+            transfer.byFolder = nextByFolder;
+            transfer.outBytesTotal += outBytesDelta;
+            if (active) {
+                transfer.lastActiveAt = now;
+            } else if (transfer.active) {
+                transfer.outbps = 0;
+                transfer.lastOutBytesTotal = transfer.outBytesTotal;
+                transfer.lastRateAt = now;
+            }
+            transfer.active = active;
+        }
+
+        function syncCloudreveTransferWithSummary(folder, summary) {
+            if (!$scope.folders[folder] || $scope.folders[folder].type !== 'uploadonly') {
+                return;
+            }
+
+            var transfer = $scope.cloudreveTransfer;
+            var idle = (summary.uploadingItems || 0) === 0 && (summary.uploadPendingItems || 0) === 0;
+            if (!idle) {
+                return;
+            }
+
+            if ($scope.progress[folder]) {
+                delete $scope.progress[folder];
+            }
+            if (transfer.byFolder[folder] !== undefined) {
+                delete transfer.byFolder[folder];
+            }
+
+            var active = false;
+            for (var modelFolder in $scope.model) {
+                if (modelFolder === folder) {
+                    continue;
+                }
+                if (!$scope.folders[modelFolder] || $scope.folders[modelFolder].type !== 'uploadonly') {
+                    continue;
+                }
+                if (($scope.model[modelFolder].uploadingItems || 0) > 0 || ($scope.model[modelFolder].uploadPendingItems || 0) > 0) {
+                    active = true;
+                    break;
+                }
+            }
+
+            if (!active) {
+                transfer.active = false;
+                transfer.outbps = 0;
+                transfer.lastOutBytesTotal = transfer.outBytesTotal;
+                transfer.lastRateAt = Date.now();
+            }
+        }
+
         $scope.$on(Events.FOLDER_SUMMARY, function (event, arg) {
             var data = arg.data;
             $scope.model[data.folder] = data.summary;
+            syncCloudreveTransferWithSummary(data.folder, data.summary);
             recalcLocalStateTotal();
         });
 
@@ -511,6 +625,13 @@ angular.module('syncthing.core')
             var hasConfig = !isEmptyObject($scope.config);
 
             $scope.config = config;
+            $scope.config.defaults = $scope.config.defaults || {};
+            $scope.config.defaults.folder = $scope.config.defaults.folder || {};
+            $scope.config.defaults.device = $scope.config.defaults.device || {};
+            $scope.config.defaults.ignores = $scope.config.defaults.ignores || { lines: [] };
+            $scope.config.options = $scope.config.options || {};
+            $scope.config.options.listenAddresses = $scope.config.options.listenAddresses || [];
+            $scope.config.options.globalAnnounceServers = $scope.config.options.globalAnnounceServers || [];
             $scope.config.options._listenAddressesStr = $scope.config.options.listenAddresses.join(', ');
             $scope.config.options._globalAnnounceServersStr = $scope.config.options.globalAnnounceServers.join(', ');
             $scope.config.options._urAcceptedStr = "" + $scope.config.options.urAccepted;
@@ -740,6 +861,69 @@ angular.module('syncthing.core')
             }).error($scope.emitHTTPError);
         }
 
+        function startCloudreveTransferRateTimer() {
+            if (cloudreveRateTimer) {
+                return;
+            }
+
+            var tick = function () {
+                if (navigatingAway) {
+                    cloudreveRateTimer = null;
+                    return;
+                }
+                $scope.$evalAsync(function () {
+                    updateCloudreveTransferRate(Date.now());
+                });
+                cloudreveRateTimer = $timeout(tick, cloudreveRateIntervalMs, false);
+            };
+
+            cloudreveRateTimer = $timeout(tick, cloudreveRateIntervalMs, false);
+        }
+
+        function updateCloudreveTransferRate(now) {
+            var transfer = $scope.cloudreveTransfer;
+            if (!transfer) {
+                return;
+            }
+
+            if (!transfer.lastRateAt) {
+                transfer.lastRateAt = now;
+                transfer.lastOutBytesTotal = transfer.outBytesTotal;
+                return;
+            }
+
+            var td = (now - transfer.lastRateAt) / 1000;
+            if (td <= 0) {
+                return;
+            }
+
+            var rawRate = 0;
+            rawRate = Math.max(0, (transfer.outBytesTotal - (transfer.lastOutBytesTotal || 0)) / td);
+            transfer.lastRateAt = now;
+            transfer.lastOutBytesTotal = transfer.outBytesTotal;
+
+            if (!transfer.active) {
+                transfer.outbps = 0;
+                return;
+            }
+
+            if (rawRate > 0) {
+                if (transfer.outbps <= 0 || rawRate > transfer.outbps * 1.5 || rawRate < transfer.outbps * 0.5) {
+                    transfer.outbps = rawRate;
+                } else {
+                    transfer.outbps = transfer.outbps * 0.3 + rawRate * 0.7;
+                }
+            } else if (now - (transfer.lastActiveAt || 0) >= cloudreveRateIntervalMs * 2) {
+                transfer.outbps = 0;
+            } else {
+                transfer.outbps *= 0.5;
+            }
+
+            if (transfer.outbps < 1) {
+                transfer.outbps = 0;
+            }
+        }
+
         function refreshErrors() {
             $http.get(urlbase + '/system/error').success(function (data) {
                 $scope.errors = data.errors;
@@ -816,7 +1000,7 @@ angular.module('syncthing.core')
         }
 
         function shouldSetDefaultFolderPath() {
-            return $scope.config.defaults.folder.path && $scope.folderEditor.folderPath.$pristine && $scope.editingFolderNew();
+            return $scope.config.defaults && $scope.config.defaults.folder && $scope.config.defaults.folder.path && $scope.folderEditor.folderPath.$pristine && $scope.editingFolderNew();
         }
 
         function resetRemoteNeed() {
@@ -1173,6 +1357,113 @@ angular.module('syncthing.core')
             }
 
             return res.join(' ');
+        };
+
+        $scope.folderTransferRate = function (folder) {
+            var state = $scope.folderTransferRates[folder];
+            if (!state) {
+                return 0;
+            }
+            if (Date.now() - state.at > 25000) {
+                return 0;
+            }
+            if ((state.rate || 0) < 1) {
+                return 0;
+            }
+            return state.rate || 0;
+        };
+
+        $scope.folderTransferRemainingBytes = function (folder) {
+            if (!$scope.model[folder]) {
+                return 0;
+            }
+
+            if ($scope.folders[folder] && $scope.folders[folder].type === 'uploadonly') {
+                return Math.max(0, ($scope.model[folder].uploadTotalBytes || 0) - ($scope.model[folder].uploadDoneBytes || 0));
+            }
+
+            var state = $scope.folderTransferRates[folder];
+            if (state && state.bytesTotal > 0) {
+                return Math.max(0, state.bytesTotal - state.bytesDone);
+            }
+
+            return Math.max(0, $scope.model[folder].needBytes || 0);
+        };
+
+        $scope.folderTransferRemaining = function (folder) {
+            var rate = $scope.folderTransferRate(folder);
+            if (rate <= 0) {
+                return "";
+            }
+
+            var seconds = $scope.folderTransferRemainingBytes(folder) / rate;
+            seconds = Math.ceil(seconds / 10) * 10;
+
+            var days = 0;
+            var res = [];
+            if (seconds >= 86400) {
+                days = Math.floor(seconds / 86400);
+                if (days > 31) {
+                    return '> 1 month';
+                }
+                res.push('' + days + 'd');
+                seconds = seconds % 86400;
+            }
+
+            var hours = 0;
+            if (seconds > 3600) {
+                hours = Math.floor(seconds / 3600);
+                res.push('' + hours + 'h');
+                seconds = seconds % 3600;
+            }
+
+            var d = new Date(1970, 0, 1).setSeconds(seconds);
+
+            if (days === 0) {
+                res.push($filter('date')(d, "m'm'"));
+            }
+
+            if (days === 0 && hours === 0) {
+                res.push($filter('date')(d, "ss's'"));
+            }
+
+            return res.join(' ');
+        };
+
+        $scope.folderTransferRateText = function (folder) {
+            var rate = $scope.folderTransferRate(folder);
+            if (rate <= 0) {
+                return "0 B/s";
+            }
+            if ($scope.metricRates) {
+                return $filter('metric')(rate * 8) + 'bps';
+            }
+            return $filter('binary')(rate) + 'B/s';
+        };
+
+        $scope.folderShouldShowTransferStats = function (folderCfg) {
+            var status = $scope.folderStatus(folderCfg);
+            return status === 'syncing' || status === 'scanning' || $scope.folderTransferRate(folderCfg.id) > 0;
+        };
+
+        $scope.cloudreveUploadRate = function () {
+            return ($scope.cloudreveTransfer && $scope.cloudreveTransfer.outbps) || 0;
+        };
+
+        $scope.thisDeviceDownloadRate = function () {
+            return ($scope.connectionsTotal && $scope.connectionsTotal.inbps) || 0;
+        };
+
+        $scope.thisDeviceUploadRate = function () {
+            var base = ($scope.connectionsTotal && $scope.connectionsTotal.outbps) || 0;
+            return base + $scope.cloudreveUploadRate();
+        };
+
+        $scope.rateText = function (rate) {
+            if ($scope.metricRates) {
+                return $filter('metric')(rate * 8) + 'bps';
+            }
+            return $filter('binary')(rate) + 'B/s';
         };
 
         $scope.deviceStatus = function (deviceCfg) {
@@ -1702,6 +1993,17 @@ angular.module('syncthing.core')
             },
         };
 
+        function applyCloudreveUploadModeDefaults(options) {
+            if (!options) {
+                return;
+            }
+            options.globalAnnounceEnabled = false;
+            options.localAnnounceEnabled = false;
+            options.relaysEnabled = false;
+            options.natEnabled = false;
+            options._listenAddressesStr = '';
+        }
+
         $scope.discardChangedSettings = function () {
             hideModal('#discard-changes-confirmation');
             $('#settings').off('hide.bs.modal')
@@ -1712,6 +2014,7 @@ angular.module('syncthing.core')
             // Make a working copy
             $scope.tmpOptions = angular.copy($scope.config.options);
             $scope.tmpOptions.cloudreve = $scope.tmpOptions.cloudreve || {};
+            $scope.cloudreveEnabledOnSettingsOpen = !!$scope.tmpOptions.cloudreve.enabled;
             $scope.tmpOptions.deviceName = $scope.thisDevice().name;
             $scope.tmpOptions.upgrades = "none";
             if ($scope.tmpOptions.autoUpgradeIntervalH > 0) {
@@ -1735,6 +2038,18 @@ angular.module('syncthing.core')
             });
             showModal('#settings');
         };
+
+        $scope.$watch('tmpOptions.cloudreve.enabled', function (newvalue, oldvalue) {
+            if (!newvalue || oldvalue === newvalue) {
+                return;
+            }
+            if ($scope.cloudreveEnabledOnSettingsOpen && oldvalue === undefined) {
+                return;
+            }
+            if (oldvalue === false || oldvalue === undefined) {
+                applyCloudreveUploadModeDefaults($scope.tmpOptions);
+            }
+        });
 
         $scope.saveConfig = function () {
             // Use "$scope.saveConfig().then" when hiding modals after saving
@@ -2518,6 +2833,8 @@ angular.module('syncthing.core')
             return $http.get(urlbase + '/config/defaults/folder').then(function (response) {
                 $scope.currentFolder = response.data;
                 $scope.currentFolder.id = folderID;
+                $scope.currentFolder.type = "uploadonly";
+                $scope.setDefaultsForFolderType();
                 initShareEditing('folder');
                 $scope.currentSharing.unrelated = $scope.currentSharing.unrelated.concat($scope.currentSharing.shared);
                 $scope.currentSharing.shared = [];
