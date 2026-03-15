@@ -167,6 +167,68 @@ func TestUploadFileRemoteFlow(t *testing.T) {
 	}
 }
 
+func TestUploadFileRetriesAsVersionWhenObjectExists(t *testing.T) {
+	t.Parallel()
+
+	var (
+		createBodies []map[string]any
+		uploaded     []string
+	)
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v4/file/upload":
+			var req map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			createBodies = append(createBodies, req)
+			if len(createBodies) == 1 {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"code": 40004,
+					"msg":  "Object existed",
+					"data": nil,
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"session_id": "session-version",
+					"chunk_size": 4,
+					"storage_policy": map[string]any{
+						"type": "local",
+					},
+				},
+			})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v4/file/upload/session-version/"):
+			body, _ := io.ReadAll(r.Body)
+			uploaded = append(uploaded, string(body))
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": nil})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "token", srv.Client())
+	if err := client.UploadFile(context.Background(), "cloudreve://root/file.txt", int64(len("abcd")), 123, "text/plain", strings.NewReader("abcd"), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(createBodies) != 2 {
+		t.Fatalf("expected two create-session requests, got %#v", createBodies)
+	}
+	if _, ok := createBodies[0]["entity_type"]; ok {
+		t.Fatalf("expected first create-session request to not specify versioning, got %#v", createBodies[0])
+	}
+	if got, _ := createBodies[1]["entity_type"].(string); got != "version" {
+		t.Fatalf("expected second create-session request to set entity_type=version, got %#v", createBodies[1])
+	}
+	if len(uploaded) != 1 || uploaded[0] != "abcd" {
+		t.Fatalf("unexpected uploaded chunks after version retry: %#v", uploaded)
+	}
+}
+
 func TestDeleteFile(t *testing.T) {
 	t.Parallel()
 

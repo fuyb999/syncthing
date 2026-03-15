@@ -28,6 +28,8 @@ var ErrUnsupportedUploadTarget = errors.New("cloudreve returned an unsupported u
 
 const uploadProgressInterval = 500 * time.Millisecond
 
+const cloudreveErrorObjectExisted = 40004
+
 type Client struct {
 	baseURL    string
 	token      string
@@ -65,7 +67,18 @@ type createUploadSessionRequest struct {
 	URI          string `json:"uri"`
 	Size         int64  `json:"size"`
 	LastModified int64  `json:"last_modified,omitempty"`
+	EntityType   string `json:"entity_type,omitempty"`
+	Previous     string `json:"previous,omitempty"`
 	MimeType     string `json:"mime_type,omitempty"`
+}
+
+type apiError struct {
+	code int
+	msg  string
+}
+
+func (e *apiError) Error() string {
+	return fmt.Sprintf("cloudreve api error %d: %s", e.code, e.msg)
 }
 
 type createFileRequest struct {
@@ -210,14 +223,30 @@ func (c *Client) createUploadSession(ctx context.Context, uri string, size int64
 		LastModified: lastModified,
 		MimeType:     mimeType,
 	}
+	return c.createUploadSessionWithRequest(ctx, req)
+}
+
+func (c *Client) createUploadSessionWithRequest(ctx context.Context, req createUploadSessionRequest) (uploadSession, error) {
 	var resp uploadSession
 	if err := c.sendJSON(ctx, http.MethodPut, "/api/v4/file/upload", req, &resp); err != nil {
-		return uploadSession{}, err
+		if isAPIErrorCode(err, cloudreveErrorObjectExisted) && req.EntityType == "" {
+			req.EntityType = "version"
+			if err := c.sendJSON(ctx, http.MethodPut, "/api/v4/file/upload", req, &resp); err != nil {
+				return uploadSession{}, err
+			}
+		} else {
+			return uploadSession{}, err
+		}
 	}
 	if resp.SessionID == "" {
 		return uploadSession{}, errors.New("cloudreve did not return a session id")
 	}
 	return resp, nil
+}
+
+func isAPIErrorCode(err error, code int) bool {
+	var apiErr *apiError
+	return errors.As(err, &apiErr) && apiErr.code == code
 }
 
 func (c *Client) uploadLocalChunks(ctx context.Context, session uploadSession, chunks [][]byte, total int64, progress func(done, total int64)) error {
@@ -486,7 +515,7 @@ func (c *Client) sendAPIRequest(ctx context.Context, method, target string, body
 		return err
 	}
 	if envelope.Code != 0 {
-		return fmt.Errorf("cloudreve api error %d: %s", envelope.Code, envelope.Msg)
+		return &apiError{code: envelope.Code, msg: envelope.Msg}
 	}
 	if respBody == nil || len(envelope.Data) == 0 || string(envelope.Data) == "null" {
 		return nil
@@ -537,7 +566,7 @@ func (c *Client) uploadRawChunkWithResponse(ctx context.Context, target, method 
 			return nil, err
 		}
 		if envelope.Code != 0 {
-			return nil, fmt.Errorf("cloudreve api error %d: %s", envelope.Code, envelope.Msg)
+			return nil, &apiError{code: envelope.Code, msg: envelope.Msg}
 		}
 		return envelope.Data, nil
 	}
