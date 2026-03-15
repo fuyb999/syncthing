@@ -126,8 +126,9 @@ type CLI struct {
 	HomeDir     string `name:"home" short:"H" placeholder:"PATH" env:"STHOMEDIR" help:"Set configuration and data directory"`
 	VersionFlag bool   `name:"version" help:"Show current version, then exit"`
 
-	Serve serveCmd `cmd:"" help:"Run Syncthing (default)" default:"withargs"`
-	CLI   cli.CLI  `cmd:"" help:"Command line interface for Syncthing"`
+	Serve    serveCmd    `cmd:"" help:"Run Syncthing (default)" default:"withargs"`
+	IDEDebug ideDebugCmd `cmd:"" name:"ide-debug" help:"Run Syncthing in the current process for IDE debugging"`
+	CLI      cli.CLI     `cmd:"" help:"Command line interface for Syncthing"`
 
 	Browser  browserCmd   `cmd:"" help:"Open GUI in browser, then exit"`
 	Decrypt  decrypt.CLI  `cmd:"" help:"Decrypt or verify an encrypted folder"`
