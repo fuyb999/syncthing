@@ -29,6 +29,7 @@ var ErrUnsupportedUploadTarget = errors.New("cloudreve returned an unsupported u
 const uploadProgressInterval = 500 * time.Millisecond
 
 const cloudreveErrorObjectExisted = 40004
+const cloudreveClientIDHeader = "X-Cr-Client-Id"
 
 type Client struct {
 	baseURL    string
@@ -91,6 +92,29 @@ type deleteFileRequest struct {
 	Uris           []string `json:"uris"`
 	Unlink         bool     `json:"unlink"`
 	SkipSoftDelete bool     `json:"skip_soft_delete"`
+}
+
+type DeviceReportRequest struct {
+	DeviceID      string         `json:"device_id"`
+	ShortID       string         `json:"short_id"`
+	APIKey        string         `json:"api_key"`
+	JSONRaw       map[string]any `json:"json_raw,omitempty"`
+	BindURI       string         `json:"bind_uri,omitempty"`
+	ClientVersion string         `json:"client_version,omitempty"`
+	Platform      string         `json:"platform,omitempty"`
+}
+
+type DeviceHeartbeatRequest struct {
+	DeviceID string `json:"device_id"`
+	ShortID  string `json:"short_id,omitempty"`
+	BindURI  string `json:"bind_uri,omitempty"`
+}
+
+type DeviceActivityRequest struct {
+	DeviceID string    `json:"device_id"`
+	ShortID  string    `json:"short_id,omitempty"`
+	BindURI  string    `json:"bind_uri,omitempty"`
+	SyncedAt time.Time `json:"synced_at,omitempty"`
 }
 
 type qiniuChunkResponse struct {
@@ -174,6 +198,24 @@ func (c *Client) Delete(ctx context.Context, uris ...string) error {
 		return nil
 	}
 	return err
+}
+
+func (c *Client) ReportDevice(ctx context.Context, req DeviceReportRequest) error {
+	return c.sendJSONWithHeaders(ctx, http.MethodPut, "/api/v4/devices/syncthing/report", req, nil, map[string]string{
+		cloudreveClientIDHeader: strings.TrimSpace(req.DeviceID),
+	})
+}
+
+func (c *Client) HeartbeatDevice(ctx context.Context, req DeviceHeartbeatRequest) error {
+	return c.sendJSONWithHeaders(ctx, http.MethodPost, "/api/v4/devices/syncthing/heartbeat", req, nil, map[string]string{
+		cloudreveClientIDHeader: strings.TrimSpace(req.DeviceID),
+	})
+}
+
+func (c *Client) ReportSyncActivity(ctx context.Context, req DeviceActivityRequest) error {
+	return c.sendJSONWithHeaders(ctx, http.MethodPost, "/api/v4/devices/syncthing/activity", req, nil, map[string]string{
+		cloudreveClientIDHeader: strings.TrimSpace(req.DeviceID),
+	})
 }
 
 func (c *Client) UploadFile(ctx context.Context, uri string, size int64, lastModified int64, mimeType string, src io.Reader, progress func(done, total int64)) error {
@@ -479,6 +521,10 @@ type requestOptions struct {
 }
 
 func (c *Client) sendJSON(ctx context.Context, method, endpoint string, reqBody, respBody any) error {
+	return c.sendJSONWithHeaders(ctx, method, endpoint, reqBody, respBody, nil)
+}
+
+func (c *Client) sendJSONWithHeaders(ctx context.Context, method, endpoint string, reqBody, respBody any, headers map[string]string) error {
 	var body io.Reader
 	if reqBody != nil {
 		payload, err := json.Marshal(reqBody)
@@ -487,10 +533,14 @@ func (c *Client) sendJSON(ctx context.Context, method, endpoint string, reqBody,
 		}
 		body = bytes.NewReader(payload)
 	}
-	return c.sendAPIRequest(ctx, method, c.baseURL+endpoint, body, respBody)
+	return c.sendAPIRequestWithHeaders(ctx, method, c.baseURL+endpoint, body, respBody, headers)
 }
 
 func (c *Client) sendAPIRequest(ctx context.Context, method, target string, body io.Reader, respBody any) error {
+	return c.sendAPIRequestWithHeaders(ctx, method, target, body, respBody, nil)
+}
+
+func (c *Client) sendAPIRequestWithHeaders(ctx context.Context, method, target string, body io.Reader, respBody any, headers map[string]string) error {
 	req, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
 		return err
@@ -498,6 +548,12 @@ func (c *Client) sendAPIRequest(ctx context.Context, method, target string, body
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for key, value := range headers {
+		if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+			continue
+		}
+		req.Header.Set(key, value)
 	}
 
 	resp, err := c.httpClient.Do(req)

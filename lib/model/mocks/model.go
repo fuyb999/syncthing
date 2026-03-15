@@ -3773,6 +3773,10 @@ func (fake *Model) UsageReportingStatsArgsForCall(i int) (*contract.Report, int,
 	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
 }
 
+func (fake *Model) ReportCloudreveDevice() {
+	fake.recordInvocation("ReportCloudreveDevice", []interface{}{})
+}
+
 func (fake *Model) WatchError(arg1 string) error {
 	fake.watchErrorMutex.Lock()
 	ret, specificReturn := fake.watchErrorReturnsOnCall[len(fake.watchErrorArgsForCall)]

@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -268,6 +269,111 @@ func TestDeleteFile(t *testing.T) {
 	}
 	if body["unlink"] == true {
 		t.Fatal("expected unlink to be false")
+	}
+}
+
+func TestReportDevice(t *testing.T) {
+	t.Parallel()
+
+	var (
+		method   string
+		path     string
+		clientID string
+		body     map[string]any
+	)
+
+	client := NewClient("https://cloudreve.example", "token", &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			method = r.Method
+			path = r.URL.Path
+			clientID = r.Header.Get(cloudreveClientIDHeader)
+			if got := r.Header.Get("Authorization"); got != "Bearer token" {
+				t.Fatalf("unexpected auth header: %q", got)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			return newJSONResponse(http.StatusOK, `{"code":0,"data":null}`), nil
+		}),
+	})
+
+	err := client.ReportDevice(context.Background(), DeviceReportRequest{
+		DeviceID:      "DEVICE-ID",
+		ShortID:       "SHORTID",
+		APIKey:        "api-key",
+		JSONRaw:       map[string]any{"foo": "bar"},
+		BindURI:       "cloudreve://my",
+		ClientVersion: "v1.2.3",
+		Platform:      "linux/amd64",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if method != http.MethodPut {
+		t.Fatalf("expected PUT request, got %q", method)
+	}
+	if path != "/api/v4/devices/syncthing/report" {
+		t.Fatalf("unexpected path: %q", path)
+	}
+	if clientID != "DEVICE-ID" {
+		t.Fatalf("unexpected client id header: %q", clientID)
+	}
+	if got, _ := body["device_id"].(string); got != "DEVICE-ID" {
+		t.Fatalf("unexpected device_id in body: %#v", body)
+	}
+	if got, _ := body["api_key"].(string); got != "api-key" {
+		t.Fatalf("unexpected api_key in body: %#v", body)
+	}
+}
+
+func TestReportSyncActivity(t *testing.T) {
+	t.Parallel()
+
+	var (
+		method   string
+		path     string
+		clientID string
+		body     map[string]any
+	)
+
+	client := NewClient("https://cloudreve.example", "token", &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			method = r.Method
+			path = r.URL.Path
+			clientID = r.Header.Get(cloudreveClientIDHeader)
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			return newJSONResponse(http.StatusOK, `{"code":0,"data":null}`), nil
+		}),
+	})
+
+	syncAt := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	err := client.ReportSyncActivity(context.Background(), DeviceActivityRequest{
+		DeviceID: "DEVICE-ID",
+		ShortID:  "SHORTID",
+		BindURI:  "cloudreve://my",
+		SyncedAt: syncAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if method != http.MethodPost {
+		t.Fatalf("expected POST request, got %q", method)
+	}
+	if path != "/api/v4/devices/syncthing/activity" {
+		t.Fatalf("unexpected path: %q", path)
+	}
+	if clientID != "DEVICE-ID" {
+		t.Fatalf("unexpected client id header: %q", clientID)
+	}
+	if got, _ := body["device_id"].(string); got != "DEVICE-ID" {
+		t.Fatalf("unexpected activity body: %#v", body)
+	}
+	if got, _ := body["bind_uri"].(string); got != "cloudreve://my" {
+		t.Fatalf("unexpected bind_uri in activity body: %#v", body)
 	}
 }
 

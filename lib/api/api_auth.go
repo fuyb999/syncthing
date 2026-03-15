@@ -343,8 +343,13 @@ func (m *basicAuthAndSessionMiddleware) cloudreveAuthCallbackHandler(w http.Resp
 		m.tokenCookieManager.createSession(firstNonEmpty(session.UserName, session.UserEmail, session.UserSub, "cloudreve"), stayLoggedIn == "1", w, r)
 	}
 
+	if err := m.setCloudreveReleasesURLFromCurrentServer(); err != nil {
+		slog.Warn("Failed to update Cloudreve releases URL after OAuth login", slogutil.Error(err))
+	}
+
 	if m.model != nil {
 		go m.model.ScanFolders()
+		go m.model.ReportCloudreveDevice()
 	}
 
 	http.Redirect(w, r, "/", http.StatusFound)
@@ -366,6 +371,35 @@ func (m *basicAuthAndSessionMiddleware) setCloudreveServer(server string) error 
 	}
 	waiter.Wait()
 	return m.cloudreveOAuth.ClearSession()
+}
+
+func (m *basicAuthAndSessionMiddleware) setCloudreveReleasesURLFromCurrentServer() error {
+	server, err := normalizeCloudreveServer(m.cfg.Options().Cloudreve.Normalized().Server)
+	if err != nil {
+		return err
+	}
+
+	target := cloudreveReleasesURL(server)
+	if m.cfg.Options().ReleasesURL == target {
+		return nil
+	}
+
+	waiter, err := m.cfg.Modify(func(cfg *config.Configuration) {
+		cfg.Options.ReleasesURL = target
+	})
+	if err != nil {
+		return err
+	}
+	waiter.Wait()
+	return nil
+}
+
+func cloudreveReleasesURL(server string) string {
+	server = strings.TrimRight(strings.TrimSpace(server), "/")
+	if server == "" {
+		return ""
+	}
+	return server + "/api/v4/site/syncthing/releases/meta.json"
 }
 
 func normalizeCloudreveServer(raw string) (string, error) {

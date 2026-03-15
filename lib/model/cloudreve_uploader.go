@@ -10,10 +10,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"mime"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -24,6 +26,7 @@ import (
 	"github.com/syncthing/syncthing/internal/cloudreve"
 	"github.com/syncthing/syncthing/internal/db"
 	"github.com/syncthing/syncthing/internal/slogutil"
+	"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
@@ -66,6 +69,10 @@ type cloudreveUploader struct {
 	pendingKV          db.KV
 	activeUploads      int
 	uploadSlotsChanged chan struct{}
+	reportRequests     chan struct{}
+	activityRequests   chan time.Time
+	activityMut        sync.Mutex
+	latestSyncActivity time.Time
 }
 
 type cloudreveFolderState struct {
@@ -99,7 +106,10 @@ type uploadJob struct {
 type cloudrevePendingAction string
 
 const (
-	cloudrevePendingNamespace = "misc/cloudreve/pending"
+	cloudrevePendingNamespace        = "misc/cloudreve/pending"
+	cloudreveDeviceHeartbeatInterval = time.Minute
+	cloudreveDeviceReportTimeout     = 20 * time.Second
+	cloudreveSyncActivityDebounce    = 5 * time.Second
 
 	cloudrevePendingUpload cloudrevePendingAction = "upload"
 	cloudrevePendingDelete cloudrevePendingAction = "delete"
@@ -132,10 +142,228 @@ func newCloudreveUploader(m *model) *cloudreveUploader {
 		oauth:              cloudreve.NewOAuthManager(m.cfg, db.NewMiscDB(m.sdb), nil),
 		pendingKV:          m.sdb,
 		uploadSlotsChanged: make(chan struct{}, 1),
+		reportRequests:     make(chan struct{}, 1),
+		activityRequests:   make(chan time.Time, 1),
 	}
 	u.Add(svcutil.AsService(u.oauth.Serve, "cloudreveUploader/oauth"))
 	u.Add(svcutil.AsService(u.listen, "cloudreveUploader/listen"))
+	u.Add(svcutil.AsService(u.reportLoop, "cloudreveUploader/report"))
 	return u
+}
+
+func (u *cloudreveUploader) String() string {
+	return fmt.Sprintf("cloudreveUploader@%p", u)
+}
+
+func (u *cloudreveUploader) CommitConfiguration(_, _ config.Configuration) bool {
+	u.requestDeviceReport()
+	return true
+}
+
+func (u *cloudreveUploader) requestDeviceReport() {
+	select {
+	case u.reportRequests <- struct{}{}:
+	default:
+	}
+}
+
+func (u *cloudreveUploader) requestSyncActivity() {
+	u.activityMut.Lock()
+	u.latestSyncActivity = time.Now().UTC()
+	u.activityMut.Unlock()
+
+	select {
+	case u.activityRequests <- time.Time{}:
+	default:
+	}
+}
+
+func (u *cloudreveUploader) reportLoop(ctx context.Context) error {
+	cfg := u.model.cfg.Subscribe(u)
+	defer u.model.cfg.Unsubscribe(u)
+
+	u.CommitConfiguration(config.Configuration{}, cfg)
+
+	heartbeatTicker := time.NewTicker(cloudreveDeviceHeartbeatInterval)
+	defer heartbeatTicker.Stop()
+
+	var (
+		activityTimer  *time.Timer
+		activityTimerC <-chan time.Time
+		pendingSyncAt  time.Time
+	)
+
+	for {
+		select {
+		case <-ctx.Done():
+			if activityTimer != nil {
+				activityTimer.Stop()
+			}
+			return nil
+		case <-u.reportRequests:
+			if err := u.runDeviceReport(ctx); err != nil {
+				slog.Warn("Cloudreve device report failed", slogutil.Error(err))
+			}
+		case <-heartbeatTicker.C:
+			if err := u.runHeartbeat(ctx); err != nil {
+				slog.Warn("Cloudreve device heartbeat failed", slogutil.Error(err))
+			}
+		case syncAt := <-u.activityRequests:
+			u.activityMut.Lock()
+			if u.latestSyncActivity.After(syncAt) {
+				syncAt = u.latestSyncActivity
+			}
+			u.activityMut.Unlock()
+			if syncAt.IsZero() {
+				syncAt = time.Now().UTC()
+			}
+			if pendingSyncAt.Before(syncAt) {
+				pendingSyncAt = syncAt
+			}
+			if activityTimer == nil {
+				activityTimer = time.NewTimer(cloudreveSyncActivityDebounce)
+			} else {
+				if !activityTimer.Stop() {
+					select {
+					case <-activityTimer.C:
+					default:
+					}
+				}
+				activityTimer.Reset(cloudreveSyncActivityDebounce)
+			}
+			activityTimerC = activityTimer.C
+		case <-activityTimerC:
+			activityTimerC = nil
+			activityTimer = nil
+			if pendingSyncAt.IsZero() {
+				continue
+			}
+			if err := u.runSyncActivity(ctx, pendingSyncAt); err != nil {
+				slog.Warn("Cloudreve device sync activity report failed", slogutil.Error(err))
+			}
+			pendingSyncAt = time.Time{}
+		}
+	}
+}
+
+func (u *cloudreveUploader) runDeviceReport(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(parent, cloudreveDeviceReportTimeout)
+	defer cancel()
+	return u.reportDevice(ctx)
+}
+
+func (u *cloudreveUploader) runHeartbeat(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(parent, cloudreveDeviceReportTimeout)
+	defer cancel()
+	return u.reportHeartbeat(ctx)
+}
+
+func (u *cloudreveUploader) runSyncActivity(parent context.Context, syncAt time.Time) error {
+	ctx, cancel := context.WithTimeout(parent, cloudreveDeviceReportTimeout)
+	defer cancel()
+	return u.reportSyncActivity(ctx, syncAt)
+}
+
+func (u *cloudreveUploader) reportDevice(ctx context.Context) error {
+	client, cloudCfg, err := u.syncthingClient(ctx)
+	if err != nil || client == nil {
+		return filterCloudreveReportError(err)
+	}
+
+	rawCfg, err := u.configSnapshot()
+	if err != nil {
+		return err
+	}
+
+	return client.ReportDevice(ctx, cloudreve.DeviceReportRequest{
+		DeviceID:      u.model.id.String(),
+		ShortID:       u.model.shortID.String(),
+		APIKey:        strings.TrimSpace(u.model.cfg.GUI().APIKey),
+		JSONRaw:       rawCfg,
+		BindURI:       u.deviceBindURI(cloudCfg),
+		ClientVersion: build.Version,
+		Platform:      runtime.GOOS + "/" + runtime.GOARCH,
+	})
+}
+
+func (u *cloudreveUploader) reportHeartbeat(ctx context.Context) error {
+	client, cloudCfg, err := u.syncthingClient(ctx)
+	if err != nil || client == nil {
+		return filterCloudreveReportError(err)
+	}
+
+	return client.HeartbeatDevice(ctx, cloudreve.DeviceHeartbeatRequest{
+		DeviceID: u.model.id.String(),
+		ShortID:  u.model.shortID.String(),
+		BindURI:  u.deviceBindURI(cloudCfg),
+	})
+}
+
+func (u *cloudreveUploader) reportSyncActivity(ctx context.Context, syncAt time.Time) error {
+	client, cloudCfg, err := u.syncthingClient(ctx)
+	if err != nil || client == nil {
+		return filterCloudreveReportError(err)
+	}
+
+	return client.ReportSyncActivity(ctx, cloudreve.DeviceActivityRequest{
+		DeviceID: u.model.id.String(),
+		ShortID:  u.model.shortID.String(),
+		BindURI:  u.deviceBindURI(cloudCfg),
+		SyncedAt: syncAt.UTC(),
+	})
+}
+
+func (u *cloudreveUploader) syncthingClient(ctx context.Context) (*cloudreve.Client, config.CloudreveConfiguration, error) {
+	cloudCfg := u.model.cfg.Options().Cloudreve.Normalized()
+	if !cloudCfg.Enabled || strings.TrimSpace(cloudCfg.Server) == "" {
+		return nil, cloudCfg, nil
+	}
+
+	token, err := u.oauth.AccessToken(ctx)
+	if err != nil {
+		return nil, cloudCfg, err
+	}
+	if token != "" {
+		cloudCfg.Token = token
+	}
+	if !cloudCfg.IsReady() {
+		return nil, cloudCfg, cloudreve.ErrOAuthNotConfigured
+	}
+
+	return cloudreve.NewClient(cloudCfg.Server, cloudCfg.Token, nil), cloudCfg, nil
+}
+
+func (u *cloudreveUploader) configSnapshot() (map[string]any, error) {
+	raw, err := json.Marshal(u.model.cfg.RawCopy())
+	if err != nil {
+		return nil, err
+	}
+
+	var res map[string]any
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, err
+	}
+	if res == nil {
+		res = map[string]any{}
+	}
+	return res, nil
+}
+
+func (u *cloudreveUploader) deviceBindURI(cloudCfg config.CloudreveConfiguration) string {
+	return strings.TrimSpace(cloudCfg.BaseURI)
+}
+
+func filterCloudreveReportError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, cloudreve.ErrOAuthNotConfigured) || errors.Is(err, cloudreve.ErrOAuthNotAuthorized) {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil
+	}
+	return err
 }
 
 func (u *cloudreveUploader) Summary(folder string) cloudreveUploadSummary {
@@ -386,7 +614,11 @@ func (u *cloudreveUploader) processJob(ctx context.Context, job uploadJob) bool 
 		if err := u.processCurrentDelete(ctx, cfg, job.path); err != nil {
 			u.setFailure(job.folder, job.path, err)
 			slog.Warn("Cloudreve delete-after-upload failed", cfg.LogAttr(), slog.String("path", job.path), slogutil.Error(err))
+			return false
 		}
+	}
+	if !requeue {
+		u.requestSyncActivity()
 	}
 	return requeue
 }
@@ -1167,6 +1399,7 @@ func (u *cloudreveUploader) syncDirectoryPending(ctx context.Context, cfg config
 		return err
 	}
 	u.clearFailure(entry.Folder, entry.Path)
+	u.requestSyncActivity()
 	return nil
 }
 
@@ -1178,6 +1411,7 @@ func (u *cloudreveUploader) syncDeletePending(ctx context.Context, cfg config.Fo
 		return err
 	}
 	u.clearFailuresMatching(entry.Folder, entry.Path, entry.Recursive)
+	u.requestSyncActivity()
 	return nil
 }
 

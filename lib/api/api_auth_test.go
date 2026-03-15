@@ -379,6 +379,9 @@ func TestCloudreveAuthCallbackHandler(t *testing.T) {
 	if !ok || session.AccessToken != "access-token" || session.RefreshToken != "refresh-token" {
 		t.Fatalf("unexpected stored oauth session: %#v", session)
 	}
+	if got := wrapped.Options().ReleasesURL; got != "https://cloudreve.example.com/api/v4/site/syncthing/releases/meta.json" {
+		t.Fatalf("unexpected releasesURL after oauth login: %q", got)
+	}
 }
 
 func TestCloudreveAuthCallbackHandlerCreatesSessionWithoutGUIAuth(t *testing.T) {
@@ -427,6 +430,9 @@ func TestCloudreveAuthCallbackHandlerCreatesSessionWithoutGUIAuth(t *testing.T) 
 	}
 	if !hasSessionCookie {
 		t.Fatal("expected GUI session cookie to be created for cloudreve-only auth")
+	}
+	if got := wrapped.Options().ReleasesURL; got != "https://cloudreve.example.com/api/v4/site/syncthing/releases/meta.json" {
+		t.Fatalf("unexpected releasesURL after cloudreve-only oauth login: %q", got)
 	}
 }
 

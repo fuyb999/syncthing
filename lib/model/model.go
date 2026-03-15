@@ -119,6 +119,7 @@ type Model interface {
 	ConnectionStats() map[string]interface{}
 	DeviceStatistics() (map[protocol.DeviceID]stats.DeviceStatistics, error)
 	FolderStatistics() (map[string]stats.FolderStatistics, error)
+	ReportCloudreveDevice()
 	UsageReportingStats(report *contract.Report, version int, preview bool)
 	ConnectedTo(remoteID protocol.DeviceID) bool
 
@@ -2707,6 +2708,13 @@ func (m *model) CloudreveUploadStatus(folder string, page, perpage int) Cloudrev
 		return CloudreveUploadStatus{Page: page, Perpage: perpage, Items: []CloudreveUploadItem{}}
 	}
 	return m.cloudUploader.UploadStatus(folder, page, perpage)
+}
+
+func (m *model) ReportCloudreveDevice() {
+	if m.cloudUploader == nil {
+		return
+	}
+	m.cloudUploader.requestDeviceReport()
 }
 
 func (m *model) WatchError(folder string) error {
