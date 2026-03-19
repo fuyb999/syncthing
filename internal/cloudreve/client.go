@@ -29,6 +29,7 @@ var ErrUnsupportedUploadTarget = errors.New("cloudreve returned an unsupported u
 const uploadProgressInterval = 500 * time.Millisecond
 
 const cloudreveErrorObjectExisted = 40004
+const cloudreveErrorDBOperationFailed = 50001
 const cloudreveClientIDHeader = "X-Cr-Client-Id"
 
 type Client struct {
@@ -224,35 +225,35 @@ func (c *Client) UploadFile(ctx context.Context, uri string, size int64, lastMod
 		return err
 	}
 
-	chunks, err := splitChunks(src, size, session.ChunkSize)
+	chunkSize, chunkCount, err := normalizeChunkLayout(size, session.ChunkSize)
 	if err != nil {
 		return err
 	}
 
 	switch session.policyType() {
 	case "local":
-		return c.uploadLocalChunks(ctx, session, chunks, size, progress)
+		return c.uploadLocalChunks(ctx, session, src, size, chunkSize, progress)
 	case "remote":
-		return c.uploadRemoteChunks(ctx, session, chunks, size, progress)
+		return c.uploadRemoteChunks(ctx, session, src, size, chunkSize, progress)
 	case "s3":
-		return c.uploadS3Like(ctx, session, chunks, size, progress, false, nil, true)
+		return c.uploadS3Like(ctx, session, src, size, chunkSize, chunkCount, progress, false, nil, true)
 	case "cos":
-		return c.uploadS3Like(ctx, session, chunks, size, progress, false, map[string]string{"x-cos-forbid-overwrite": "true"}, true)
+		return c.uploadS3Like(ctx, session, src, size, chunkSize, chunkCount, progress, false, map[string]string{"x-cos-forbid-overwrite": "true"}, true)
 	case "ks3":
-		return c.uploadS3Like(ctx, session, chunks, size, progress, false, nil, true)
+		return c.uploadS3Like(ctx, session, src, size, chunkSize, chunkCount, progress, false, nil, true)
 	case "oss":
-		return c.uploadS3Like(ctx, session, chunks, size, progress, true, map[string]string{
+		return c.uploadS3Like(ctx, session, src, size, chunkSize, chunkCount, progress, true, map[string]string{
 			"x-oss-forbid-overwrite": "true",
 			"x-oss-complete-all":     "yes",
 		}, false)
 	case "obs":
-		return c.uploadOBS(ctx, session, chunks, size, progress)
+		return c.uploadOBS(ctx, session, src, size, chunkSize, chunkCount, progress)
 	case "qiniu":
-		return c.uploadQiniu(ctx, session, chunks, size, progress)
+		return c.uploadQiniu(ctx, session, src, size, chunkSize, progress)
 	case "upyun":
-		return c.uploadUpyun(ctx, session, chunks, size, progress)
+		return c.uploadUpyun(ctx, session, src, size, chunkSize, chunkCount, progress)
 	case "onedrive":
-		return c.uploadOneDrive(ctx, session, chunks, size, progress)
+		return c.uploadOneDrive(ctx, session, src, size, chunkSize, progress)
 	default:
 		return fmt.Errorf("%w: %q", ErrUnsupportedUploadTarget, session.policyType())
 	}
@@ -291,69 +292,76 @@ func isAPIErrorCode(err error, code int) bool {
 	return errors.As(err, &apiErr) && apiErr.code == code
 }
 
-func (c *Client) uploadLocalChunks(ctx context.Context, session uploadSession, chunks [][]byte, total int64, progress func(done, total int64)) error {
+func IsRetryableError(err error) bool {
+	return isAPIErrorCode(err, cloudreveErrorDBOperationFailed)
+}
+
+func (c *Client) uploadLocalChunks(ctx context.Context, session uploadSession, src io.Reader, total, chunkSize int64, progress func(done, total int64)) error {
 	var uploaded int64
 	tracker := newUploadProgressTracker(total, progress)
-	for idx, chunk := range chunks {
-		if err := c.uploadRequest(ctx, http.MethodPost, c.baseURL+"/api/v4/file/upload/"+session.SessionID+"/"+strconv.Itoa(idx), tracker.Wrap(uploaded, bytes.NewReader(chunk)), requestOptions{
+	return forEachUploadChunk(src, total, chunkSize, func(idx int, chunk uploadChunk) error {
+		if err := c.uploadRequest(ctx, http.MethodPost, c.baseURL+"/api/v4/file/upload/"+session.SessionID+"/"+strconv.Itoa(idx), tracker.Wrap(uploaded, chunk.Reader), requestOptions{
 			headers: map[string]string{
 				"Authorization": "Bearer " + c.token,
 				"Content-Type":  "application/octet-stream",
 			},
 			expectAPIResponse: true,
-			contentLength:     int64(len(chunk)),
+			contentLength:     chunk.Size,
 		}); err != nil {
 			return err
 		}
-		uploaded += int64(len(chunk))
+		uploaded += chunk.Size
 		tracker.Report(uploaded, true)
-	}
-	return nil
+		return nil
+	})
 }
 
-func (c *Client) uploadRemoteChunks(ctx context.Context, session uploadSession, chunks [][]byte, total int64, progress func(done, total int64)) error {
+func (c *Client) uploadRemoteChunks(ctx context.Context, session uploadSession, src io.Reader, total, chunkSize int64, progress func(done, total int64)) error {
 	if len(session.UploadURLs) == 0 {
 		return ErrUnsupportedUploadTarget
 	}
 	var uploaded int64
 	tracker := newUploadProgressTracker(total, progress)
-	for idx, chunk := range chunks {
+	return forEachUploadChunk(src, total, chunkSize, func(idx int, chunk uploadChunk) error {
 		target, err := addQuery(session.UploadURLs[0], "chunk", strconv.Itoa(idx))
 		if err != nil {
 			return err
 		}
-		if err := c.uploadRequest(ctx, http.MethodPost, target, tracker.Wrap(uploaded, bytes.NewReader(chunk)), requestOptions{
+		if err := c.uploadRequest(ctx, http.MethodPost, target, tracker.Wrap(uploaded, chunk.Reader), requestOptions{
 			headers: map[string]string{
 				"Authorization": session.Credential,
 				"Content-Type":  "application/octet-stream",
 			},
-			contentLength: int64(len(chunk)),
+			contentLength: chunk.Size,
 		}); err != nil {
 			return err
 		}
-		uploaded += int64(len(chunk))
+		uploaded += chunk.Size
 		tracker.Report(uploaded, true)
-	}
-	return nil
+		return nil
+	})
 }
 
-func (c *Client) uploadS3Like(ctx context.Context, session uploadSession, chunks [][]byte, total int64, progress func(done, total int64), isOSS bool, finishHeaders map[string]string, callback bool) error {
-	if len(session.UploadURLs) < len(chunks) || session.CompleteURL == "" {
+func (c *Client) uploadS3Like(ctx context.Context, session uploadSession, src io.Reader, total, chunkSize, chunkCount int64, progress func(done, total int64), isOSS bool, finishHeaders map[string]string, callback bool) error {
+	if int64(len(session.UploadURLs)) < chunkCount || session.CompleteURL == "" {
 		return ErrUnsupportedUploadTarget
 	}
-	parts := make([]completePartElement, 0, len(chunks))
+	parts := make([]completePartElement, 0, chunkCount)
 	var uploaded int64
 	tracker := newUploadProgressTracker(total, progress)
-	for idx, chunk := range chunks {
-		etag, err := c.uploadRawChunk(ctx, session.UploadURLs[idx], tracker.Wrap(uploaded, bytes.NewReader(chunk)), int64(len(chunk)), nil)
+	if err := forEachUploadChunk(src, total, chunkSize, func(idx int, chunk uploadChunk) error {
+		etag, err := c.uploadRawChunk(ctx, session.UploadURLs[idx], tracker.Wrap(uploaded, chunk.Reader), chunk.Size, nil)
 		if err != nil {
 			return err
 		}
 		if !isOSS {
 			parts = append(parts, completePartElement{PartNumber: idx + 1, ETag: etag})
 		}
-		uploaded += int64(len(chunk))
+		uploaded += chunk.Size
 		tracker.Report(uploaded, true)
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	var body []byte
@@ -376,21 +384,24 @@ func (c *Client) uploadS3Like(ctx context.Context, session uploadSession, chunks
 	return nil
 }
 
-func (c *Client) uploadOBS(ctx context.Context, session uploadSession, chunks [][]byte, total int64, progress func(done, total int64)) error {
-	if len(session.UploadURLs) < len(chunks) || session.CompleteURL == "" {
+func (c *Client) uploadOBS(ctx context.Context, session uploadSession, src io.Reader, total, chunkSize, chunkCount int64, progress func(done, total int64)) error {
+	if int64(len(session.UploadURLs)) < chunkCount || session.CompleteURL == "" {
 		return ErrUnsupportedUploadTarget
 	}
-	parts := make([]completePartElement, 0, len(chunks))
+	parts := make([]completePartElement, 0, chunkCount)
 	var uploaded int64
 	tracker := newUploadProgressTracker(total, progress)
-	for idx, chunk := range chunks {
-		etag, err := c.uploadRawChunk(ctx, session.UploadURLs[idx], tracker.Wrap(uploaded, bytes.NewReader(chunk)), int64(len(chunk)), nil)
+	if err := forEachUploadChunk(src, total, chunkSize, func(idx int, chunk uploadChunk) error {
+		etag, err := c.uploadRawChunk(ctx, session.UploadURLs[idx], tracker.Wrap(uploaded, chunk.Reader), chunk.Size, nil)
 		if err != nil {
 			return err
 		}
 		parts = append(parts, completePartElement{PartNumber: idx + 1, ETag: etag})
-		uploaded += int64(len(chunk))
+		uploaded += chunk.Size
 		tracker.Report(uploaded, true)
+		return nil
+	}); err != nil {
+		return err
 	}
 	payload, err := xml.Marshal(completeMultipartUpload{Parts: parts})
 	if err != nil {
@@ -400,20 +411,24 @@ func (c *Client) uploadOBS(ctx context.Context, session uploadSession, chunks []
 	return err
 }
 
-func (c *Client) uploadQiniu(ctx context.Context, session uploadSession, chunks [][]byte, total int64, progress func(done, total int64)) error {
+func (c *Client) uploadQiniu(ctx context.Context, session uploadSession, src io.Reader, total, chunkSize int64, progress func(done, total int64)) error {
 	if len(session.UploadURLs) == 0 {
 		return ErrUnsupportedUploadTarget
 	}
-	parts := make([]qiniuPartInfo, 0, len(chunks))
+	_, chunkCount, err := normalizeChunkLayout(total, chunkSize)
+	if err != nil {
+		return err
+	}
+	parts := make([]qiniuPartInfo, 0, chunkCount)
 	var uploaded int64
 	tracker := newUploadProgressTracker(total, progress)
-	for idx, chunk := range chunks {
+	if err := forEachUploadChunk(src, total, chunkSize, func(idx int, chunk uploadChunk) error {
 		target := strings.TrimRight(session.UploadURLs[0], "/") + "/" + strconv.Itoa(idx+1)
-		body, err := c.uploadRawChunkWithResponse(ctx, target, http.MethodPut, tracker.Wrap(uploaded, bytes.NewReader(chunk)), requestOptions{
+		body, err := c.uploadRawChunkWithResponse(ctx, target, http.MethodPut, tracker.Wrap(uploaded, chunk.Reader), requestOptions{
 			headers: map[string]string{
 				"Authorization": "UpToken " + session.Credential,
 			},
-			contentLength: int64(len(chunk)),
+			contentLength: chunk.Size,
 		})
 		if err != nil {
 			return err
@@ -423,8 +438,11 @@ func (c *Client) uploadQiniu(ctx context.Context, session uploadSession, chunks 
 			return err
 		}
 		parts = append(parts, qiniuPartInfo{ETag: resp.ETag, PartNumber: idx + 1})
-		uploaded += int64(len(chunk))
+		uploaded += chunk.Size
 		tracker.Report(uploaded, true)
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	payload, err := json.Marshal(qiniuCompleteRequest{
@@ -443,52 +461,66 @@ func (c *Client) uploadQiniu(ctx context.Context, session uploadSession, chunks 
 	return err
 }
 
-func (c *Client) uploadUpyun(ctx context.Context, session uploadSession, chunks [][]byte, total int64, progress func(done, total int64)) error {
-	if len(session.UploadURLs) == 0 || len(chunks) != 1 {
+func (c *Client) uploadUpyun(ctx context.Context, session uploadSession, src io.Reader, total, chunkSize, chunkCount int64, progress func(done, total int64)) error {
+	if len(session.UploadURLs) == 0 || chunkCount != 1 {
 		return ErrUnsupportedUploadTarget
 	}
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	if err := writer.WriteField("policy", session.UploadPolicy); err != nil {
-		return err
-	}
-	if err := writer.WriteField("authorization", session.Credential); err != nil {
-		return err
-	}
-	if session.MimeType != "" {
-		if err := writer.WriteField("content-type", session.MimeType); err != nil {
-			return err
+	tracker := newUploadProgressTracker(total, progress)
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
+	go func() {
+		var writeErr error
+		defer func() {
+			if writeErr != nil {
+				_ = pw.CloseWithError(writeErr)
+				return
+			}
+			writeErr = writer.Close()
+			_ = pw.CloseWithError(writeErr)
+		}()
+		if writeErr = writer.WriteField("policy", session.UploadPolicy); writeErr != nil {
+			return
 		}
-	}
-	header := textproto.MIMEHeader{}
-	header.Set("Content-Disposition", `form-data; name="file"; filename="upload"`)
-	if session.MimeType != "" {
-		header.Set("Content-Type", session.MimeType)
-	} else {
-		header.Set("Content-Type", "application/octet-stream")
-	}
-	part, err := writer.CreatePart(header)
-	if err != nil {
-		return err
-	}
-	if _, err := part.Write(chunks[0]); err != nil {
-		return err
-	}
-	if err := writer.Close(); err != nil {
-		return err
-	}
-	if _, err := c.uploadRawChunkWithResponse(ctx, session.UploadURLs[0], http.MethodPost, bytes.NewReader(body.Bytes()), requestOptions{
+		if writeErr = writer.WriteField("authorization", session.Credential); writeErr != nil {
+			return
+		}
+		if session.MimeType != "" {
+			if writeErr = writer.WriteField("content-type", session.MimeType); writeErr != nil {
+				return
+			}
+		}
+		header := textproto.MIMEHeader{}
+		header.Set("Content-Disposition", `form-data; name="file"; filename="upload"`)
+		if session.MimeType != "" {
+			header.Set("Content-Type", session.MimeType)
+		} else {
+			header.Set("Content-Type", "application/octet-stream")
+		}
+		part, err := writer.CreatePart(header)
+		if err != nil {
+			writeErr = err
+			return
+		}
+		writeErr = forEachUploadChunk(src, total, chunkSize, func(_ int, chunk uploadChunk) error {
+			_, err := io.Copy(part, tracker.Wrap(0, chunk.Reader))
+			if err == nil {
+				tracker.Report(chunk.Size, true)
+			}
+			return err
+		})
+	}()
+	if _, err := c.uploadRawChunkWithResponse(ctx, session.UploadURLs[0], http.MethodPost, pr, requestOptions{
 		headers: map[string]string{
 			"Content-Type": writer.FormDataContentType(),
 		},
 	}); err != nil {
 		return err
 	}
-	reportProgress(progress, int64(len(chunks[0])), total)
+	reportProgress(progress, total, total)
 	return nil
 }
 
-func (c *Client) uploadOneDrive(ctx context.Context, session uploadSession, chunks [][]byte, total int64, progress func(done, total int64)) error {
+func (c *Client) uploadOneDrive(ctx context.Context, session uploadSession, src io.Reader, total, chunkSize int64, progress func(done, total int64)) error {
 	if len(session.UploadURLs) == 0 {
 		return ErrUnsupportedUploadTarget
 	}
@@ -497,19 +529,22 @@ func (c *Client) uploadOneDrive(ctx context.Context, session uploadSession, chun
 	}
 	var uploaded int64
 	tracker := newUploadProgressTracker(total, progress)
-	for _, chunk := range chunks {
+	if err := forEachUploadChunk(src, total, chunkSize, func(_ int, chunk uploadChunk) error {
 		start := uploaded
-		end := uploaded + int64(len(chunk)) - 1
-		if _, err := c.uploadRawChunkWithResponse(ctx, session.UploadURLs[0], http.MethodPut, tracker.Wrap(uploaded, bytes.NewReader(chunk)), requestOptions{
+		end := uploaded + chunk.Size - 1
+		if _, err := c.uploadRawChunkWithResponse(ctx, session.UploadURLs[0], http.MethodPut, tracker.Wrap(uploaded, chunk.Reader), requestOptions{
 			headers: map[string]string{
 				"Content-Range": fmt.Sprintf("bytes %d-%d/%d", start, end, total),
 			},
-			contentLength: int64(len(chunk)),
+			contentLength: chunk.Size,
 		}); err != nil {
 			return err
 		}
-		uploaded += int64(len(chunk))
+		uploaded += chunk.Size
 		tracker.Report(uploaded, true)
+		return nil
+	}); err != nil {
+		return err
 	}
 	return c.sendAPIRequest(ctx, http.MethodPost, c.baseURL+"/api/v4/callback/onedrive/"+session.SessionID+"/"+session.CallbackSecret, nil, nil)
 }
@@ -636,40 +671,80 @@ func (c *Client) uploadRawChunkWithResponse(ctx context.Context, target, method 
 	return data, nil
 }
 
-func splitChunks(src io.Reader, total, chunkSize int64) ([][]byte, error) {
+type uploadChunk struct {
+	Offset int64
+	Size   int64
+	Reader io.Reader
+}
+
+type uploadChunkReader struct {
+	reader    io.Reader
+	remaining int64
+}
+
+func normalizeChunkLayout(total, chunkSize int64) (int64, int64, error) {
 	if total < 0 {
-		return nil, fmt.Errorf("invalid size %d", total)
+		return 0, 0, fmt.Errorf("invalid size %d", total)
 	}
 	if chunkSize <= 0 || chunkSize > total {
 		chunkSize = total
 	}
 	if total == 0 {
-		return [][]byte{{}}, nil
+		return 0, 1, nil
 	}
 	if chunkSize <= 0 {
 		chunkSize = total
 	}
-	if chunkSize > int64(^uint(0)>>1) {
-		return nil, fmt.Errorf("cloudreve chunk size too large: %d", chunkSize)
+	return chunkSize, (total + chunkSize - 1) / chunkSize, nil
+}
+
+func forEachUploadChunk(src io.Reader, total, chunkSize int64, fn func(idx int, chunk uploadChunk) error) error {
+	chunkSize, _, err := normalizeChunkLayout(total, chunkSize)
+	if err != nil {
+		return err
+	}
+	if total == 0 {
+		return fn(0, uploadChunk{Reader: bytes.NewReader(nil)})
 	}
 
-	buf := make([]byte, int(chunkSize))
-	chunks := make([][]byte, 0, int((total+chunkSize-1)/chunkSize))
-	for {
-		n, readErr := io.ReadFull(src, buf)
-		if readErr != nil && !errors.Is(readErr, io.EOF) && !errors.Is(readErr, io.ErrUnexpectedEOF) {
-			return nil, readErr
+	var offset int64
+	for idx := 0; offset < total; idx++ {
+		size := chunkSize
+		if remaining := total - offset; remaining < size {
+			size = remaining
 		}
-		if n > 0 {
-			chunk := make([]byte, n)
-			copy(chunk, buf[:n])
-			chunks = append(chunks, chunk)
+		chunk := uploadChunk{
+			Offset: offset,
+			Size:   size,
+			Reader: &uploadChunkReader{
+				reader:    src,
+				remaining: size,
+			},
 		}
-		if errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
-			break
+		if err := fn(idx, chunk); err != nil {
+			return err
 		}
+		offset += size
 	}
-	return chunks, nil
+	return nil
+}
+
+func (r *uploadChunkReader) Read(buf []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	if int64(len(buf)) > r.remaining {
+		buf = buf[:r.remaining]
+	}
+	n, err := r.reader.Read(buf)
+	r.remaining -= int64(n)
+	if errors.Is(err, io.EOF) && r.remaining > 0 {
+		return n, io.ErrUnexpectedEOF
+	}
+	if r.remaining == 0 && err == nil {
+		return n, io.EOF
+	}
+	return n, err
 }
 
 func addQuery(rawURL, key, value string) (string, error) {

@@ -42,8 +42,8 @@ generated in the GUI, or set in the \fBconfiguration/gui/apikey\fP element in
 the configuration file. To use an API key, set the request header
 \fBX\-API\-Key\fP to the API key value, or set it as a \fBBearer\fP token in the
 \fBAuthorization\fP header. For example, \fBcurl \-X POST \-H \(dqX\-API\-Key: abc123\(dq
-http://localhost:8384/rest/...\fP or \fBcurl \-X POST \-H \(dqAuthorization: Bearer
-abc123\(dq http://localhost:8384/rest/...\fP can be used to invoke with \fBcurl\fP
+http://localhost:18384/rest/...\fP or \fBcurl \-X POST \-H \(dqAuthorization: Bearer
+abc123\(dq http://localhost:18384/rest/...\fP can be used to invoke with \fBcurl\fP
 (add \fB\-k\fP flag when using HTTPS with a Syncthing generated or self signed
 certificate).
 .sp
@@ -69,12 +69,12 @@ to the given path (e.g. \fB/tmp/\fP matches all its subdirectories). If the opti
 .INDENT 3.5
 .sp
 .EX
-$ curl \-H \(dqX\-API\-Key: yourkey\(dq localhost:8384/rest/system/browse | json_pp
+$ curl \-H \(dqX\-API\-Key: yourkey\(dq localhost:18384/rest/system/browse | json_pp
 [
     \(dq/\(dq
 ]
 
-$ curl \-H \(dqX\-API\-Key: yourkey\(dq localhost:8384/rest/system/browse?current=/var/ | json_pp
+$ curl \-H \(dqX\-API\-Key: yourkey\(dq localhost:18384/rest/system/browse?current=/var/ | json_pp
 [
     \(dq/var/backups/\(dq,
     \(dq/var/cache/\(dq,
@@ -89,7 +89,7 @@ $ curl \-H \(dqX\-API\-Key: yourkey\(dq localhost:8384/rest/system/browse?curren
     \(dq/var/tmp/\(dq
 ]
 
-$ curl \-H \(dqX\-API\-Key: yourkey\(dq localhost:8384/rest/system/browse?current=/var/*o | json_pp
+$ curl \-H \(dqX\-API\-Key: yourkey\(dq localhost:18384/rest/system/browse?current=/var/*o | json_pp
 [
     \(dq/var/local/\(dq,
     \(dq/var/lock/\(dq,
@@ -196,7 +196,7 @@ Returns the current configuration.
   ],
   \(dqgui\(dq: {
     \(dqenabled\(dq: true,
-    \(dqaddress\(dq: \(dq127.0.0.1:8384\(dq,
+    \(dqaddress\(dq: \(dq127.0.0.1:18384\(dq,
     \(dqunixSocketPermissions\(dq: \(dq\(dq,
     \(dquser\(dq: \(dqUsername\(dq,
     \(dqpassword\(dq: \(dq$2a$10$ZFws69T4FlvWwsqeIwL.TOo5zOYqsa/.TxlUnsGYS.j3JvjFTmxo6\(dq,
@@ -488,9 +488,9 @@ the discovery cache.
 .INDENT 3.5
 .sp
 .EX
-curl \-X POST http://127.0.0.1:8384/rest/system/discovery?device=LGFPDIT7SKNNJVJZA4FC7QNCRKCE753K72BW5QD2FOZ7FRFEP57Q\e&addr=192.162.129.11:22000
+curl \-X POST http://127.0.0.1:18384/rest/system/discovery?device=LGFPDIT7SKNNJVJZA4FC7QNCRKCE753K72BW5QD2FOZ7FRFEP57Q\e&addr=192.162.129.11:22000
 # Or with the X\-API\-Key header:
-curl \-X POST \-\-header \(dqX\-API\-Key: TcE28kVPdtJ8COws1JdM0b2nodj77WeQ\(dq http://127.0.0.1:8384/rest/system/discovery?device=LGFPDIT7SKNNJVJZA4FC7QNCRKCE753K72BW5QD2FOZ7FRFEP57Q\e&addr=192.162.129.11:22000
+curl \-X POST \-\-header \(dqX\-API\-Key: TcE28kVPdtJ8COws1JdM0b2nodj77WeQ\(dq http://127.0.0.1:18384/rest/system/discovery?device=LGFPDIT7SKNNJVJZA4FC7QNCRKCE753K72BW5QD2FOZ7FRFEP57Q\e&addr=192.162.129.11:22000
 .EE
 .UNINDENT
 .UNINDENT
@@ -592,7 +592,7 @@ facilites as keys and desired log level (\fBDEBUG\fP, \fBINFO\fP, \fBWARN\fP, or
 .INDENT 3.5
 .sp
 .EX
-$ curl \-H X\-API\-Key:abc123 \-d \(aq{\(dqbeacon\(dq:\(dqDEBUG\(dq,\(dqdiscovery\(dq:\(dqWARN\(dq}\(aq \(aqhttp://localhost:8384/rest/system/loglevels\(aq
+$ curl \-H X\-API\-Key:abc123 \-d \(aq{\(dqbeacon\(dq:\(dqDEBUG\(dq,\(dqdiscovery\(dq:\(dqWARN\(dq}\(aq \(aqhttp://localhost:18384/rest/system/loglevels\(aq
 .EE
 .UNINDENT
 .UNINDENT
@@ -660,7 +660,7 @@ information for that folder will be erased:
 .INDENT 3.5
 .sp
 .EX
-curl \-X POST \-H \(dqX\-API\-Key: abc123\(dq http://localhost:8384/rest/system/reset?folder=ab1c2\-def3g
+curl \-X POST \-H \(dqX\-API\-Key: abc123\(dq http://localhost:18384/rest/system/reset?folder=ab1c2\-def3g
 .EE
 .UNINDENT
 .UNINDENT
@@ -905,7 +905,7 @@ values for the \fBdevice\fP parameter are those from the corresponding
 .INDENT 3.5
 .sp
 .EX
-$ curl \-X DELETE \-H \(dqX\-API\-Key: abc123\(dq http://localhost:8384/rest/cluster/pending/devices?device=P56IOI7\-MZJNU2Y\-IQGDREY\-DM2MGTI\-MGL3BXN\-PQ6W5BM\-TBBZ4TJ\-XZWICQ2
+$ curl \-X DELETE \-H \(dqX\-API\-Key: abc123\(dq http://localhost:18384/rest/cluster/pending/devices?device=P56IOI7\-MZJNU2Y\-IQGDREY\-DM2MGTI\-MGL3BXN\-PQ6W5BM\-TBBZ4TJ\-XZWICQ2
 .EE
 .UNINDENT
 .UNINDENT
@@ -951,7 +951,7 @@ device, or from \fIany\fP device if omitted.
 .INDENT 3.5
 .sp
 .EX
-$ curl \-X DELETE \-H \(dqX\-API\-Key: abc123\(dq http://localhost:8384/rest/cluster/pending/folders?folder=cpkn4\-57ysy&device=P56IOI7\-MZJNU2Y\-IQGDREY\-DM2MGTI\-MGL3BXN\-PQ6W5BM\-TBBZ4TJ\-XZWICQ2
+$ curl \-X DELETE \-H \(dqX\-API\-Key: abc123\(dq http://localhost:18384/rest/cluster/pending/folders?folder=cpkn4\-57ysy&device=P56IOI7\-MZJNU2Y\-IQGDREY\-DM2MGTI\-MGL3BXN\-PQ6W5BM\-TBBZ4TJ\-XZWICQ2
 .EE
 .UNINDENT
 .UNINDENT
@@ -1103,7 +1103,7 @@ the file path as attribute name.
 .INDENT 3.5
 .sp
 .EX
-curl \-X POST \-H X\-API\-key:... http://127.0.0.1:8384/rest/folder/versions?folder=default \-d \(aq{
+curl \-X POST \-H X\-API\-key:... http://127.0.0.1:18384/rest/folder/versions?folder=default \-d \(aq{
   \(dqdir1/dir2/bar\(dq: \(dq2022\-02\-06T20:44:12+01:00\(dq,
   \(dqbaz\(dq: \(dq2022\-02\-06T20:44:20+01:00\(dq
 }\(aq
@@ -1127,7 +1127,7 @@ start building the structure.
 .INDENT 3.5
 .sp
 .EX
-$ curl \-s http://localhost:8384/rest/db/browse?folder=j663y\-3ct3e&prefix=DCIM&levels=2
+$ curl \-s http://localhost:18384/rest/db/browse?folder=j663y\-3ct3e&prefix=DCIM&levels=2
 [
     {
         \(dqmodTime\(dq : \(dq2020\-10\-02T23:48:52.076996974+02:00\(dq,
@@ -1290,7 +1290,7 @@ URL\-encoded.
 .INDENT 3.5
 .sp
 .EX
-$ curl \-s \-H X\-API\-KEY:... \(dqhttp://localhost:8384/rest/db/file?folder=YOUR_FOLDER_ID\(dq \-\-url\-query \(dqfile=path/to/file.pdf\(dq
+$ curl \-s \-H X\-API\-KEY:... \(dqhttp://localhost:18384/rest/db/file?folder=YOUR_FOLDER_ID\(dq \-\-url\-query \(dqfile=path/to/file.pdf\(dq
 .EE
 .UNINDENT
 .UNINDENT
@@ -1533,7 +1533,7 @@ Takes the mandatory parameter \fIfolder\fP (folder ID).
 .INDENT 3.5
 .sp
 .EX
-curl \-X POST \-H X\-API\-key:... http://127.0.0.1:8384/rest/db/override?folder=default
+curl \-X POST \-H X\-API\-key:... http://127.0.0.1:18384/rest/db/override?folder=default
 .EE
 .UNINDENT
 .UNINDENT
@@ -1544,7 +1544,7 @@ Moves the file to the top of the download queue.
 .INDENT 3.5
 .sp
 .EX
-curl \-X POST http://127.0.0.1:8384/rest/db/prio?folder=default&file=foo/bar
+curl \-X POST http://127.0.0.1:18384/rest/db/prio?folder=default&file=foo/bar
 .EE
 .UNINDENT
 .UNINDENT
@@ -1605,7 +1605,7 @@ Takes the mandatory parameter \fIfolder\fP (folder ID).
 .INDENT 3.5
 .sp
 .EX
-curl \-X POST \-H X\-API\-Key:... http://127.0.0.1:8384/rest/db/revert?folder=default
+curl \-X POST \-H X\-API\-Key:... http://127.0.0.1:18384/rest/db/revert?folder=default
 .EE
 .UNINDENT
 .UNINDENT
@@ -1628,7 +1628,7 @@ plain text error if an error occurred during scanning.
 .INDENT 3.5
 .sp
 .EX
-curl \-X POST http://127.0.0.1:8384/rest/db/scan?folder=default&sub=foo/bar
+curl \-X POST http://127.0.0.1:18384/rest/db/scan?folder=default&sub=foo/bar
 .EE
 .UNINDENT
 .UNINDENT
@@ -1766,7 +1766,7 @@ time the device was last seen and the last connection duration.
 .INDENT 3.5
 .sp
 .EX
-$ curl \-s http://localhost:8384/rest/stats/device | json
+$ curl \-s http://localhost:18384/rest/stats/device | json
 {
   \(dqP56IOI7\-MZJNU2Y\-IQGDREY\-DM2MGTI\-MGL3BXN\-PQ6W5BM\-TBBZ4TJ\-XZWICQ2\(dq: {
     \(dqlastSeen\(dq : \(dq2015\-04\-18T11:21:31.3256277+01:00\(dq
@@ -1807,12 +1807,12 @@ either a valid device ID in modern format, or an error.
 .INDENT 3.5
 .sp
 .EX
-$ curl \-s http://localhost:8384/rest/svc/deviceid?id=1234 | json
+$ curl \-s http://localhost:18384/rest/svc/deviceid?id=1234 | json
 {
   \(dqerror\(dq: \(dqdevice ID invalid: incorrect length\(dq
 }
 
-$ curl \-s http://localhost:8384/rest/svc/deviceid?id=p56ioi7m\-\-zjnu2iq\-gdr\-eydm\-2mgtmgl3bxnpq6w5btbbz4tjxzwicq | json
+$ curl \-s http://localhost:18384/rest/svc/deviceid?id=p56ioi7m\-\-zjnu2iq\-gdr\-eydm\-2mgtmgl3bxnpq6w5btbbz4tjxzwicq | json
 {
   \(dqid\(dq: \(dqP56IOI7\-MZJNU2Y\-IQGDREY\-DM2MGTI\-MGL3BXN\-PQ6W5BM\-TBBZ4TJ\-XZWICQ2\(dq
 }
@@ -1929,7 +1929,7 @@ Shows diagnostics about a certain file in a shared folder.  Takes the \fBfolder\
 .INDENT 3.5
 .sp
 .EX
-$ curl \-H X\-API\-Key:... \(dqhttp://localhost:8384/rest/debug/file?folder=default&file=foo/bar\(dq
+$ curl \-H X\-API\-Key:... \(dqhttp://localhost:18384/rest/debug/file?folder=default&file=foo/bar\(dq
 .EE
 .UNINDENT
 .UNINDENT

@@ -1377,17 +1377,17 @@ func TestHostCheck(t *testing.T) {
 		t.Error("Suspicious Host header: expected 403 Forbidden, not", resp.Status)
 	}
 
-	// A request with an explicit "localhost:8384" Host header should pass
+	// A request with an explicit "localhost:18384" Host header should pass
 
 	req, _ = http.NewRequest("GET", baseURL, nil)
-	req.Host = "localhost:8384"
+	req.Host = "localhost:18384"
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Error("Explicit localhost:8384: expected 200 OK, not", resp.Status)
+		t.Error("Explicit localhost:18384: expected 200 OK, not", resp.Status)
 	}
 
 	// A request with an explicit "localhost" Host header (no port) should pass
@@ -1485,17 +1485,17 @@ func TestHostCheck(t *testing.T) {
 		t.Error("Suspicious Host header (IPv6): expected 403 Forbidden, not", resp.Status)
 	}
 
-	// A request with an explicit "localhost:8384" Host header should pass
+	// A request with an explicit "localhost:18384" Host header should pass
 
 	req, _ = http.NewRequest("GET", baseURL, nil)
-	req.Host = "localhost:8384"
+	req.Host = "localhost:18384"
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Error("Explicit localhost:8384 (IPv6): expected 200 OK, not", resp.Status)
+		t.Error("Explicit localhost:18384 (IPv6): expected 200 OK, not", resp.Status)
 	}
 }
 

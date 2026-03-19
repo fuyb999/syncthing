@@ -8,9 +8,16 @@ package model
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/syncthing/syncthing/internal/cloudreve"
 	"github.com/syncthing/syncthing/internal/db"
 	"github.com/syncthing/syncthing/internal/db/sqlite"
 	"github.com/syncthing/syncthing/lib/config"
@@ -274,6 +281,289 @@ func TestCloudreveUploaderFinishUploadClearsOnlyCurrentPendingEntry(t *testing.T
 	})
 }
 
+func TestCloudreveUploaderSummaryKeepsCompletedBytesUntilBatchFinishes(t *testing.T) {
+	uploader := &cloudreveUploader{
+		ev:                 events.NoopLogger,
+		folders:            make(map[string]*cloudreveFolderState),
+		uploadSlotsChanged: make(chan struct{}, 1),
+		ensureSlotsChanged: make(chan struct{}, 1),
+		ensuringDirs:       make(map[string]chan struct{}),
+	}
+	uploader.folders["default"] = &cloudreveFolderState{
+		files: map[string]*cloudreveFileState{
+			"queued.bin": {
+				Path:         "queued.bin",
+				BytesTotal:   100,
+				TrackedBytes: 100,
+				Queued:       true,
+			},
+			"uploading.bin": {
+				Path:         "uploading.bin",
+				BytesDone:    25,
+				BytesTotal:   100,
+				TrackedBytes: 100,
+				Uploading:    true,
+			},
+		},
+		failed:             make(map[string]FileError),
+		ensuredDirs:        make(map[string]struct{}),
+		progressTotalBytes: 200,
+	}
+
+	summary := uploader.Summary("default")
+	if summary.TotalBytes != 200 || summary.DoneBytes != 25 {
+		t.Fatalf("unexpected initial summary: %#v", summary)
+	}
+
+	requeue, deleteAfter, err := uploader.finishUpload("default", "uploading.bin", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requeue || deleteAfter {
+		t.Fatalf("expected upload to finish cleanly, got requeue=%v deleteAfter=%v", requeue, deleteAfter)
+	}
+
+	summary = uploader.Summary("default")
+	if summary.TotalItems != 1 || summary.PendingItems != 1 || summary.UploadingItems != 0 {
+		t.Fatalf("unexpected summary after first completion: %#v", summary)
+	}
+	if summary.TotalBytes != 200 || summary.DoneBytes != 100 {
+		t.Fatalf("expected completed bytes to stay counted until the batch finishes, got %#v", summary)
+	}
+
+	uploader.folders["default"].files["queued.bin"].Queued = false
+	uploader.folders["default"].files["queued.bin"].Uploading = true
+
+	requeue, deleteAfter, err = uploader.finishUpload("default", "queued.bin", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requeue || deleteAfter {
+		t.Fatalf("expected final upload to finish cleanly, got requeue=%v deleteAfter=%v", requeue, deleteAfter)
+	}
+
+	summary = uploader.Summary("default")
+	if summary.TotalBytes != 0 || summary.DoneBytes != 0 || summary.TotalItems != 0 {
+		t.Fatalf("expected progress state to reset after the batch becomes idle, got %#v", summary)
+	}
+}
+
+func TestBufferCloudreveEventsDrainsBurstWithoutLoss(t *testing.T) {
+	logger := events.NewLogger()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- logger.Serve(ctx)
+	}()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	sub := logger.Subscribe(events.LocalChangeDetected)
+	defer sub.Unsubscribe()
+
+	eventCh := bufferCloudreveEvents(ctx, sub, events.BufferSize*4)
+
+	logger.Log(events.LocalChangeDetected, -1)
+	select {
+	case ev := <-eventCh:
+		if got, ok := ev.Data.(int); !ok || got != -1 {
+			t.Fatalf("unexpected warm-up event: %#v", ev)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for warm-up event")
+	}
+
+	const burstEvents = events.BufferSize * 4
+	for i := 0; i < burstEvents; i++ {
+		logger.Log(events.LocalChangeDetected, i)
+	}
+
+	received := make(map[int]struct{}, burstEvents)
+	deadline := time.After(5 * time.Second)
+	for len(received) < burstEvents {
+		select {
+		case ev := <-eventCh:
+			got, ok := ev.Data.(int)
+			if !ok {
+				t.Fatalf("unexpected event payload type: %#v", ev.Data)
+			}
+			received[got] = struct{}{}
+		case <-deadline:
+			t.Fatalf("timed out after receiving %d/%d burst events", len(received), burstEvents)
+		}
+	}
+}
+
+func TestCloudreveUploaderEnsureRemoteFolderDeduplicatesAndCachesAncestors(t *testing.T) {
+	uploader, wrapper, _ := newCloudreveUploaderTestHarness(t)
+	const workers = 64
+
+	var (
+		mut     sync.Mutex
+		uris    []string
+		started = make(chan struct{}, 1)
+		release = make(chan struct{})
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v4/file/create" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		mut.Lock()
+		uris = append(uris, body["uri"].(string))
+		mut.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": nil})
+	}))
+	defer srv.Close()
+
+	waiter, err := wrapper.Modify(func(cfg *config.Configuration) {
+		cfg.Options.Cloudreve.Server = srv.URL
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiter.Wait()
+
+	fcfg, ok := wrapper.Folder("default")
+	if !ok {
+		t.Fatal("missing folder config")
+	}
+	cloudCfg := wrapper.Options().Cloudreve.Normalized()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			errs <- uploader.ensureRemoteFolder(ctx, fcfg, cloudCfg, "a/b")
+		}()
+	}
+
+	<-started
+	close(release)
+
+	for i := 0; i < workers; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := uploader.ensureRemoteFolder(ctx, fcfg, cloudCfg, "a"); err != nil {
+		t.Fatal(err)
+	}
+
+	mut.Lock()
+	defer mut.Unlock()
+	if len(uris) != 1 {
+		t.Fatalf("expected a single remote ensure request, got %#v", uris)
+	}
+	if uris[0] != cloudreve.JoinURI(cloudreve.JoinURI(cloudCfg.BaseURI, fcfg.Label), "a/b") {
+		t.Fatalf("unexpected ensure uri: %#v", uris)
+	}
+}
+
+func TestCloudreveUploaderUploadFileRetriesTransientCloudreveErrors(t *testing.T) {
+	uploader, wrapper, mdb := newCloudreveUploaderTestHarness(t)
+
+	fcfg, ok := wrapper.Folder("default")
+	if !ok {
+		t.Fatal("missing folder config")
+	}
+
+	const relPath = "retry.bin"
+	content := []byte("retry-content")
+	fd, err := fcfg.Filesystem().Create(relPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fd.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := fd.Close(); err != nil {
+		t.Fatal(err)
+	}
+	putCloudreveLocalFileWithContent(t, mdb, relPath, 1, int64(len(content)))
+
+	var (
+		createCalls int32
+		uploadCalls int32
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v4/file/create":
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": nil})
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v4/file/upload":
+			call := atomic.AddInt32(&createCalls, 1)
+			if call == 1 {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"code": 50001,
+					"msg":  "Failed to start transaction",
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"session_id": "retry-session",
+					"chunk_size": len(content),
+					"storage_policy": map[string]any{
+						"type": "local",
+					},
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v4/file/upload/retry-session/0":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(body) != len(content) {
+				t.Fatalf("unexpected upload length: got=%d want=%d", len(body), len(content))
+			}
+			atomic.AddInt32(&uploadCalls, 1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": nil})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	waiter, err := wrapper.Modify(func(cfg *config.Configuration) {
+		cfg.Options.Cloudreve.Server = srv.URL
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiter.Wait()
+
+	if err := uploader.uploadFile(context.Background(), fcfg, relPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := atomic.LoadInt32(&createCalls); got != 2 {
+		t.Fatalf("expected upload session creation to be retried once, got %d attempts", got)
+	}
+	if got := atomic.LoadInt32(&uploadCalls); got != 1 {
+		t.Fatalf("expected a single successful upload, got %d", got)
+	}
+}
+
 func TestCloudreveUploaderRecursiveDeleteReplacesChildPendingEntries(t *testing.T) {
 	uploader, _, _ := newCloudreveUploaderTestHarness(t)
 
@@ -319,6 +609,95 @@ func TestCloudreveUploaderRecursiveDeleteReplacesChildPendingEntries(t *testing.
 	}
 }
 
+func TestCloudreveUploaderSyncDirectoryPendingSkipsStaleEntry(t *testing.T) {
+	uploader, wrapper, _ := newCloudreveUploaderTestHarness(t)
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		t.Fatalf("unexpected request for stale mkdir entry: %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	waiter, err := wrapper.Modify(func(cfg *config.Configuration) {
+		cfg.Options.Cloudreve.Server = srv.URL
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiter.Wait()
+
+	entry := cloudrevePendingEntry{
+		Folder:   "default",
+		Path:     "dir",
+		Action:   cloudrevePendingMkdir,
+		Type:     "dir",
+		Sequence: 1,
+	}
+	newer := entry
+	newer.Sequence = 2
+	if err := uploader.savePendingEntry(newer); err != nil {
+		t.Fatal(err)
+	}
+
+	fcfg, ok := wrapper.Folder("default")
+	if !ok {
+		t.Fatal("missing folder config")
+	}
+
+	if err := uploader.syncDirectoryPending(context.Background(), fcfg, entry); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("expected stale mkdir entry to be skipped, got %d requests", calls.Load())
+	}
+}
+
+func TestCloudreveUploaderSyncDeletePendingSkipsStaleEntry(t *testing.T) {
+	uploader, wrapper, _ := newCloudreveUploaderTestHarness(t)
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		t.Fatalf("unexpected request for stale delete entry: %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	waiter, err := wrapper.Modify(func(cfg *config.Configuration) {
+		cfg.Options.Cloudreve.Server = srv.URL
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiter.Wait()
+
+	entry := cloudrevePendingEntry{
+		Folder:   "default",
+		Path:     "file.txt",
+		Action:   cloudrevePendingDelete,
+		Type:     "file",
+		Sequence: 1,
+	}
+	newer := entry
+	newer.Action = cloudrevePendingUpload
+	newer.Sequence = 2
+	if err := uploader.savePendingEntry(newer); err != nil {
+		t.Fatal(err)
+	}
+
+	fcfg, ok := wrapper.Folder("default")
+	if !ok {
+		t.Fatal("missing folder config")
+	}
+
+	if err := uploader.syncDeletePending(context.Background(), fcfg, entry); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("expected stale delete entry to be skipped, got %d requests", calls.Load())
+	}
+}
+
 func newCloudreveUploaderTestHarness(t *testing.T) (*cloudreveUploader, config.Wrapper, db.DB) {
 	t.Helper()
 
@@ -353,15 +732,20 @@ func newCloudreveUploaderTestHarness(t *testing.T) (*cloudreveUploader, config.W
 
 func putCloudreveLocalFile(t *testing.T, mdb db.DB, path string, sequence int64) {
 	t.Helper()
+	putCloudreveLocalFileWithContent(t, mdb, path, sequence, 128)
+}
+
+func putCloudreveLocalFileWithContent(t *testing.T, mdb db.DB, path string, sequence int64, size int64) {
+	t.Helper()
 	if err := mdb.Update("default", protocol.LocalDeviceID, []protocol.FileInfo{{
 		Name:      path,
 		Sequence:  sequence,
 		Type:      protocol.FileInfoTypeFile,
-		Size:      128,
+		Size:      size,
 		ModifiedS: 1,
 		Blocks: []protocol.BlockInfo{{
 			Offset: 0,
-			Size:   128,
+			Size:   int(size),
 			Hash:   []byte{1},
 		}},
 	}}); err != nil {

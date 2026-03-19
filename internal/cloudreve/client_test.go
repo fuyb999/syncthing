@@ -21,8 +21,54 @@ import (
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
+type gatedReader struct {
+	total   int64
+	gate    int64
+	sent    int64
+	release <-chan struct{}
+}
+
+type zeroReader struct{}
+
 func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)
+}
+
+func (r *gatedReader) Read(p []byte) (int, error) {
+	if r.sent >= r.total {
+		return 0, io.EOF
+	}
+
+	if r.sent >= r.gate {
+		<-r.release
+	}
+
+	allowed := r.total - r.sent
+	if r.sent < r.gate && allowed > r.gate-r.sent {
+		allowed = r.gate - r.sent
+	}
+	if allowed <= 0 {
+		<-r.release
+		allowed = r.total - r.sent
+	}
+	if int64(len(p)) > allowed {
+		p = p[:allowed]
+	}
+	for i := range p {
+		p[i] = byte('a' + (r.sent+int64(i))%26)
+	}
+	r.sent += int64(len(p))
+	if r.sent >= r.total {
+		return len(p), io.EOF
+	}
+	return len(p), nil
+}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
 }
 
 func newJSONResponse(status int, payload string) *http.Response {
@@ -38,6 +84,17 @@ func TestJoinURI(t *testing.T) {
 
 	if got := JoinURI("cloudreve://syncthing", "foo/bar"); got != "cloudreve://syncthing/foo/bar" {
 		t.Fatalf("unexpected uri: %q", got)
+	}
+}
+
+func TestIsRetryableError(t *testing.T) {
+	t.Parallel()
+
+	if !IsRetryableError(&apiError{code: cloudreveErrorDBOperationFailed, msg: "Failed to start transaction"}) {
+		t.Fatal("expected database operation errors to be retryable")
+	}
+	if IsRetryableError(&apiError{code: cloudreveErrorObjectExisted, msg: "Object already exists"}) {
+		t.Fatal("expected conflict errors to remain non-retryable")
 	}
 }
 
@@ -165,6 +222,69 @@ func TestUploadFileRemoteFlow(t *testing.T) {
 	}
 	if len(lengths) != 2 || lengths[0] != 3 || lengths[1] != 2 {
 		t.Fatalf("unexpected remote content lengths: %#v", lengths)
+	}
+}
+
+func TestUploadFileStartsFirstChunkBeforeReadingWholeSource(t *testing.T) {
+	t.Parallel()
+
+	firstRequest := make(chan struct{}, 1)
+	release := make(chan struct{})
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v4/file/upload":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"session_id": "session-local",
+					"chunk_size": 4,
+					"storage_policy": map[string]any{
+						"type": "local",
+					},
+				},
+			})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v4/file/upload/session-local/"):
+			select {
+			case firstRequest <- struct{}{}:
+			default:
+			}
+			if _, err := io.Copy(io.Discard, r.Body); err != nil {
+				t.Fatal(err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": nil})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "token", srv.Client())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- client.UploadFile(context.Background(), "cloudreve://root/file.bin", 8, 123, "", &gatedReader{
+			total:   8,
+			gate:    4,
+			release: release,
+		}, nil)
+	}()
+
+	select {
+	case <-firstRequest:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first upload request did not start before the remaining source bytes were released")
+	}
+
+	close(release)
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upload to complete")
 	}
 }
 
@@ -663,5 +783,68 @@ func TestUploadFileOneDriveFlow(t *testing.T) {
 	}
 	if len(uploaded) != 2 || uploaded[0] != "abcd" || uploaded[1] != "efgh" {
 		t.Fatalf("unexpected onedrive chunks: %#v", uploaded)
+	}
+}
+
+func TestUploadFileLargeSourceStreamsInChunks(t *testing.T) {
+	t.Parallel()
+
+	const (
+		totalSize = 32 << 20
+		chunkSize = 4 << 20
+	)
+
+	var (
+		chunks     int
+		totalRead  int64
+		progresses []int64
+	)
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v4/file/upload":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"session_id": "session-local",
+					"chunk_size": chunkSize,
+					"storage_policy": map[string]any{
+						"type": "local",
+					},
+				},
+			})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v4/file/upload/session-local/"):
+			n, err := io.Copy(io.Discard, r.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			chunks++
+			totalRead += n
+			if r.ContentLength != chunkSize && r.ContentLength != totalSize%chunkSize {
+				t.Fatalf("unexpected content length: %d", r.ContentLength)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": nil})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "token", srv.Client())
+	if err := client.UploadFile(context.Background(), "cloudreve://root/large.bin", totalSize, 123, "application/octet-stream", io.LimitReader(zeroReader{}, totalSize), func(done, _ int64) {
+		progresses = append(progresses, done)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if chunks != totalSize/chunkSize {
+		t.Fatalf("unexpected chunk count: %d", chunks)
+	}
+	if totalRead != totalSize {
+		t.Fatalf("unexpected streamed size: %d", totalRead)
+	}
+	if len(progresses) == 0 || progresses[len(progresses)-1] != totalSize {
+		t.Fatalf("unexpected progress updates: %#v", progresses)
 	}
 }

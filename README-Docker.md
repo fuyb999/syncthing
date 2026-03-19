@@ -46,7 +46,7 @@ services:
     network_mode: host
     restart: unless-stopped
     healthcheck:
-      test: curl -fkLsS -m 2 127.0.0.1:8384/rest/noauth/health | grep -o --color=never OK || exit 1
+      test: curl -fkLsS -m 2 127.0.0.1:18384/rest/noauth/health | grep -o --color=never OK || exit 1
       interval: 1m
       timeout: 10s
       retries: 3
@@ -69,7 +69,7 @@ there are conflicts.
 
 ## GUI Security
 
-By default Syncthing inside the Docker image listens on `0.0.0.0:8384`. This
+By default Syncthing inside the Docker image listens on `0.0.0.0:18384`. This
 allows GUI connections when running without host network mode. The example
 above unsets the `STGUIADDRESS` environment variable to have Syncthing fall
 back to listening on what has been configured in the configuration file or the

@@ -548,16 +548,16 @@ On Windows, use the \fB|\fP character to escape the brackets (\fBq|[abc|]x\fP), 
 character is used as a path separator.
 .SS How do I access the web GUI from another computer?
 .sp
-The default listening address is 127.0.0.1:8384, so you can only access the GUI
+The default listening address is 127.0.0.1:18384, so you can only access the GUI
 from the same machine.  This is for security reasons.  To access it from another
 computer, change the \fBGUI listen address\fP option in the web GUI from
-\fB127.0.0.1:8384\fP to \fB0.0.0.0:8384\fP, or change the \fBconfig.xml\fP:
+\fB127.0.0.1:18384\fP to \fB0.0.0.0:18384\fP, or change the \fBconfig.xml\fP:
 .INDENT 0.0
 .INDENT 3.5
 .sp
 .EX
 <gui enabled=\(dqtrue\(dq tls=\(dqfalse\(dq>
-  <address>127.0.0.1:8384</address>
+  <address>127.0.0.1:18384</address>
 .EE
 .UNINDENT
 .UNINDENT
@@ -568,7 +568,7 @@ to
 .sp
 .EX
 <gui enabled=\(dqtrue\(dq tls=\(dqtrue\(dq>
-  <address>0.0.0.0:8384</address>
+  <address>0.0.0.0:18384</address>
 .EE
 .UNINDENT
 .UNINDENT
@@ -583,7 +583,7 @@ GUI settings at default and use an SSH port forward to access it.  For example,
 .INDENT 3.5
 .sp
 .EX
-$ ssh \-L 9090:127.0.0.1:8384 user@othercomputer.example.com
+$ ssh \-L 9090:127.0.0.1:18384 user@othercomputer.example.com
 .EE
 .UNINDENT
 .UNINDENT
@@ -597,7 +597,7 @@ use this example:
 .INDENT 3.5
 .sp
 .EX
-$ ssh \-N \-L 9090:127.0.0.1:8384 user@othercomputer.example.com
+$ ssh \-N \-L 9090:127.0.0.1:18384 user@othercomputer.example.com
 .EE
 .UNINDENT
 .UNINDENT
@@ -733,7 +733,7 @@ For example, the two emphasized lines below would be removed from the file.
 .sp
 .EX
 <gui enabled=\(dqtrue\(dq tls=\(dqfalse\(dq>
-   <address>127.0.0.1:8384</address>
+   <address>127.0.0.1:18384</address>
    <user>syncguy</user>
    <password>$2a$10$s9wWHOQe...Cq7GPye69</password>
    <apikey>9RCKohqCAyrj5RjpyZdR2wXmQ9PyQFeN</apikey>

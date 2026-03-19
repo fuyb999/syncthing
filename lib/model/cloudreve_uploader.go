@@ -69,6 +69,11 @@ type cloudreveUploader struct {
 	pendingKV          db.KV
 	activeUploads      int
 	uploadSlotsChanged chan struct{}
+	uploadQueue        chan uploadJob
+	activeEnsures      int
+	ensureSlotsChanged chan struct{}
+	pendingQueue       chan cloudrevePendingEntry
+	ensuringDirs       map[string]chan struct{}
 	reportRequests     chan struct{}
 	activityRequests   chan time.Time
 	activityMut        sync.Mutex
@@ -76,19 +81,23 @@ type cloudreveUploader struct {
 }
 
 type cloudreveFolderState struct {
-	files  map[string]*cloudreveFileState
-	failed map[string]FileError
+	files              map[string]*cloudreveFileState
+	failed             map[string]FileError
+	ensuredDirs        map[string]struct{}
+	progressTotalBytes int64
+	progressDoneBytes  int64
 }
 
 type cloudreveFileState struct {
-	Path       string
-	BytesDone  int64
-	BytesTotal int64
-	Queued     bool
-	Uploading  bool
-	Retry      bool
-	Obsolete   cloudreveObsoleteAction
-	cancel     context.CancelFunc
+	Path         string
+	BytesDone    int64
+	BytesTotal   int64
+	TrackedBytes int64
+	Queued       bool
+	Uploading    bool
+	Retry        bool
+	Obsolete     cloudreveObsoleteAction
+	cancel       context.CancelFunc
 }
 
 type cloudreveEventData struct {
@@ -110,6 +119,15 @@ const (
 	cloudreveDeviceHeartbeatInterval = time.Minute
 	cloudreveDeviceReportTimeout     = 20 * time.Second
 	cloudreveSyncActivityDebounce    = 5 * time.Second
+	cloudreveEnsureWorkerCount       = 1
+	cloudreveEventBufferSize         = 16384
+	cloudrevePendingQueueSize        = cloudreveEventBufferSize
+	cloudrevePendingWorkerCount      = 1
+	cloudreveUploadQueueSize         = 32768
+	cloudreveUploadWorkerCount       = 64
+	cloudreveUploadMaxAttempts       = 5
+	cloudreveUploadRetryBaseDelay    = 100 * time.Millisecond
+	cloudreveUploadRetryMaxDelay     = time.Second
 
 	cloudrevePendingUpload cloudrevePendingAction = "upload"
 	cloudrevePendingDelete cloudrevePendingAction = "delete"
@@ -142,6 +160,10 @@ func newCloudreveUploader(m *model) *cloudreveUploader {
 		oauth:              cloudreve.NewOAuthManager(m.cfg, db.NewMiscDB(m.sdb), nil),
 		pendingKV:          m.sdb,
 		uploadSlotsChanged: make(chan struct{}, 1),
+		uploadQueue:        make(chan uploadJob, cloudreveUploadQueueSize),
+		ensureSlotsChanged: make(chan struct{}, 1),
+		pendingQueue:       make(chan cloudrevePendingEntry, cloudrevePendingQueueSize),
+		ensuringDirs:       make(map[string]chan struct{}),
 		reportRequests:     make(chan struct{}, 1),
 		activityRequests:   make(chan time.Time, 1),
 	}
@@ -156,6 +178,11 @@ func (u *cloudreveUploader) String() string {
 }
 
 func (u *cloudreveUploader) CommitConfiguration(_, _ config.Configuration) bool {
+	u.mut.Lock()
+	for _, state := range u.folders {
+		clear(state.ensuredDirs)
+	}
+	u.mut.Unlock()
 	u.requestDeviceReport()
 	return true
 }
@@ -376,19 +403,27 @@ func (u *cloudreveUploader) Summary(folder string) cloudreveUploadSummary {
 	}
 
 	var summary cloudreveUploadSummary
+	summary.TotalBytes = state.progressTotalBytes
+	summary.DoneBytes = state.progressDoneBytes
 	for _, file := range state.files {
 		if !file.Queued && !file.Uploading {
 			continue
 		}
 		summary.TotalItems++
-		summary.TotalBytes += file.BytesTotal
-		summary.DoneBytes += file.BytesDone
+		done := file.BytesDone
+		if file.TrackedBytes > 0 && done > file.TrackedBytes {
+			done = file.TrackedBytes
+		}
+		summary.DoneBytes += done
 		if file.Uploading {
 			summary.UploadingItems++
 		}
 		if file.Queued {
 			summary.PendingItems++
 		}
+	}
+	if summary.DoneBytes > summary.TotalBytes {
+		summary.DoneBytes = summary.TotalBytes
 	}
 	return summary
 }
@@ -474,6 +509,30 @@ func (u *cloudreveUploader) UploadStatus(folder string, page, perpage int) Cloud
 func (u *cloudreveUploader) listen(ctx context.Context) error {
 	sub := u.ev.Subscribe(events.LocalChangeDetected | events.FolderPaused | events.FolderResumed)
 	defer sub.Unsubscribe()
+	eventCh := bufferCloudreveEvents(ctx, sub, cloudreveEventBufferSize)
+
+	var workers sync.WaitGroup
+	startCloudreveWorkers(&workers, ctx, cloudrevePendingWorkerCount, func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case entry := <-u.pendingQueue:
+				u.processPendingEntry(ctx, entry)
+			}
+		}
+	})
+	startCloudreveWorkers(&workers, ctx, cloudreveUploadWorkerCount, func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case job := <-u.uploadQueue:
+				u.processJobLoop(ctx, job)
+			}
+		}
+	})
+	defer workers.Wait()
 
 	u.restorePending(ctx, "")
 
@@ -481,7 +540,7 @@ func (u *cloudreveUploader) listen(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case ev, ok := <-sub.C():
+		case ev, ok := <-eventCh:
 			if !ok {
 				return nil
 			}
@@ -523,7 +582,7 @@ func (u *cloudreveUploader) listen(ctx context.Context) error {
 							continue
 						}
 						if ok {
-							go u.processPendingEntry(ctx, entry)
+							u.enqueuePendingEntry(ctx, entry)
 						}
 						continue
 					}
@@ -534,7 +593,7 @@ func (u *cloudreveUploader) listen(ctx context.Context) error {
 						continue
 					}
 					if ok {
-						go u.processPendingEntry(ctx, entry)
+						u.enqueuePendingEntry(ctx, entry)
 					}
 				case "file":
 					if payload["action"] == "deleted" {
@@ -545,7 +604,7 @@ func (u *cloudreveUploader) listen(ctx context.Context) error {
 							continue
 						}
 						if ok {
-							go u.processPendingEntry(ctx, entry)
+							u.enqueuePendingEntry(ctx, entry)
 						}
 						continue
 					}
@@ -557,7 +616,7 @@ func (u *cloudreveUploader) listen(ctx context.Context) error {
 						continue
 					}
 					if u.enqueue(folderID, relPath) {
-						go u.processJobLoop(ctx, uploadJob{folder: folderID, path: relPath})
+						u.enqueueUploadJob(ctx, uploadJob{folder: folderID, path: relPath})
 					}
 				}
 			}
@@ -638,30 +697,42 @@ func (u *cloudreveUploader) uploadFile(ctx context.Context, cfg config.FolderCon
 	}
 	client := cloudreve.NewClient(cloudCfg.Server, cloudCfg.Token, nil)
 	rootURI := u.cloudreveFolderRootURI(cfg, cloudCfg)
-	dirURI := cloudreve.JoinURI(rootURI, path.Dir(relPath))
-	if err := client.EnsureFolder(ctx, dirURI); err != nil {
+	if err := u.ensureRemoteFolder(ctx, cfg, cloudCfg, path.Dir(relPath)); err != nil {
 		return err
 	}
 
-	fd, err := cfg.Filesystem().Open(relPath)
-	if err != nil {
-		if fs.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	defer fd.Close()
-
+	uri := cloudreve.JoinURI(rootURI, relPath)
+	mimeType := mime.TypeByExtension(path.Ext(relPath))
 	progress := func(done, total int64) {
 		u.updateProgress(cfg.ID, relPath, done, total)
 	}
-	uri := cloudreve.JoinURI(rootURI, relPath)
-	mimeType := mime.TypeByExtension(path.Ext(relPath))
-	err = client.UploadFile(ctx, uri, info.Size, info.ModTime().UnixMilli(), mimeType, fd, progress)
-	if err != nil {
-		return err
+
+	var lastErr error
+	for attempt := 1; attempt <= cloudreveUploadMaxAttempts; attempt++ {
+		fd, err := cfg.Filesystem().Open(relPath)
+		if err != nil {
+			if fs.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+
+		u.updateProgress(cfg.ID, relPath, 0, info.Size)
+		err = client.UploadFile(ctx, uri, info.Size, info.ModTime().UnixMilli(), mimeType, fd, progress)
+		_ = fd.Close()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !cloudreve.IsRetryableError(err) || attempt == cloudreveUploadMaxAttempts {
+			return err
+		}
+		if err := sleepCloudreveRetry(ctx, cloudreveUploadRetryDelay(attempt)); err != nil {
+			return err
+		}
 	}
-	return nil
+
+	return lastErr
 }
 
 func (u *cloudreveUploader) cloudreveConfig(ctx context.Context, folder config.FolderConfiguration) (config.CloudreveConfiguration, error) {
@@ -712,11 +783,115 @@ func (u *cloudreveUploader) folderStateLocked(folder string) *cloudreveFolderSta
 		return state
 	}
 	state = &cloudreveFolderState{
-		files:  make(map[string]*cloudreveFileState),
-		failed: make(map[string]FileError),
+		files:       make(map[string]*cloudreveFileState),
+		failed:      make(map[string]FileError),
+		ensuredDirs: make(map[string]struct{}),
 	}
 	u.folders[folder] = state
 	return state
+}
+
+func normalizeCloudreveDirectoryPath(relPath string) string {
+	relPath = path.Clean(strings.TrimSpace(filepath.ToSlash(relPath)))
+	if relPath == "." || relPath == "/" {
+		return ""
+	}
+	return strings.TrimPrefix(relPath, "/")
+}
+
+func cloudreveEnsuredPathPrefixes(relPath string) []string {
+	relPath = normalizeCloudreveDirectoryPath(relPath)
+	if relPath == "" {
+		return []string{""}
+	}
+
+	parts := strings.Split(relPath, "/")
+	res := make([]string, 0, len(parts)+1)
+	res = append(res, "")
+	for i := range parts {
+		res = append(res, strings.Join(parts[:i+1], "/"))
+	}
+	return res
+}
+
+func (u *cloudreveUploader) markEnsuredDirLocked(folder, relPath string) {
+	state := u.folderStateLocked(folder)
+	for _, ensured := range cloudreveEnsuredPathPrefixes(relPath) {
+		state.ensuredDirs[ensured] = struct{}{}
+	}
+}
+
+func (u *cloudreveUploader) isEnsuredDirLocked(folder, relPath string) bool {
+	state, ok := u.folders[folder]
+	if !ok {
+		return false
+	}
+	_, ok = state.ensuredDirs[normalizeCloudreveDirectoryPath(relPath)]
+	return ok
+}
+
+func (u *cloudreveUploader) clearEnsuredDirLocked(folder, relPath string, recursive bool) {
+	state, ok := u.folders[folder]
+	if !ok {
+		return
+	}
+	relPath = normalizeCloudreveDirectoryPath(relPath)
+	for ensured := range state.ensuredDirs {
+		if matchesCloudrevePath(ensured, relPath, recursive) {
+			delete(state.ensuredDirs, ensured)
+		}
+	}
+}
+
+func (s *cloudreveFolderState) adjustProgressTotal(delta int64) {
+	s.progressTotalBytes += delta
+	if s.progressTotalBytes < 0 {
+		s.progressTotalBytes = 0
+	}
+	if s.progressDoneBytes > s.progressTotalBytes {
+		s.progressDoneBytes = s.progressTotalBytes
+	}
+}
+
+func (s *cloudreveFolderState) updateTrackedBytes(file *cloudreveFileState, size int64) {
+	s.adjustProgressTotal(size - file.TrackedBytes)
+	file.TrackedBytes = size
+}
+
+func (s *cloudreveFolderState) dropTrackedBytes(file *cloudreveFileState) {
+	if file.TrackedBytes == 0 {
+		return
+	}
+	s.adjustProgressTotal(-file.TrackedBytes)
+	file.TrackedBytes = 0
+}
+
+func (s *cloudreveFolderState) commitTrackedBytes(file *cloudreveFileState) {
+	if file.TrackedBytes <= 0 {
+		return
+	}
+	s.progressDoneBytes += file.TrackedBytes
+	if s.progressDoneBytes > s.progressTotalBytes {
+		s.progressDoneBytes = s.progressTotalBytes
+	}
+	file.TrackedBytes = 0
+}
+
+func (s *cloudreveFolderState) hasActiveUploads() bool {
+	for _, file := range s.files {
+		if file.Queued || file.Uploading {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *cloudreveFolderState) resetProgressIfIdle() {
+	if s.hasActiveUploads() {
+		return
+	}
+	s.progressTotalBytes = 0
+	s.progressDoneBytes = 0
 }
 
 func (u *cloudreveUploader) enqueue(folder, relPath string) bool {
@@ -732,20 +907,32 @@ func (u *cloudreveUploader) enqueue(folder, relPath string) bool {
 	file, ok := state.files[relPath]
 	if !ok {
 		state.files[relPath] = &cloudreveFileState{
-			Path:       relPath,
-			BytesTotal: size,
-			Queued:     true,
+			Path:         relPath,
+			BytesTotal:   size,
+			TrackedBytes: size,
+			Queued:       true,
 		}
+		state.adjustProgressTotal(size)
 		u.emitProgress(folder)
 		return true
 	}
 	if file.Uploading {
 		file.Retry = true
+		if size != file.TrackedBytes {
+			state.updateTrackedBytes(file, size)
+			u.emitProgress(folder)
+		}
 		return false
 	}
 	if file.Queued {
+		if size != file.TrackedBytes || file.BytesTotal != size {
+			state.updateTrackedBytes(file, size)
+			file.BytesTotal = size
+			u.emitProgress(folder)
+		}
 		return false
 	}
+	state.updateTrackedBytes(file, size)
 	file.Queued = true
 	file.BytesDone = 0
 	file.BytesTotal = size
@@ -832,11 +1019,14 @@ func (u *cloudreveUploader) finishUpload(folder, relPath string, attempt *cloudr
 			file.Queued = true
 			file.Obsolete = cloudreveObsoleteNone
 			file.BytesDone = 0
+			file.BytesTotal = file.TrackedBytes
 			delete(state.failed, relPath)
 		} else {
+			state.dropTrackedBytes(file)
 			delete(state.files, relPath)
 			delete(state.failed, relPath)
 		}
+		state.resetProgressIfIdle()
 		u.emitProgress(folder)
 		u.emitErrorsLocked(folder)
 		u.mut.Unlock()
@@ -850,6 +1040,8 @@ func (u *cloudreveUploader) finishUpload(folder, relPath string, attempt *cloudr
 	}
 
 	if err != nil {
+		state.dropTrackedBytes(file)
+		state.resetProgressIfIdle()
 		state.failed[relPath] = FileError{Path: relPath, Err: err.Error()}
 		u.emitProgress(folder)
 		u.emitErrorsLocked(folder)
@@ -861,11 +1053,14 @@ func (u *cloudreveUploader) finishUpload(folder, relPath string, attempt *cloudr
 	if requeue {
 		file.Queued = true
 		file.BytesDone = 0
+		file.BytesTotal = file.TrackedBytes
 		delete(state.failed, relPath)
 	} else {
+		state.commitTrackedBytes(file)
 		delete(state.files, relPath)
 		delete(state.failed, relPath)
 	}
+	state.resetProgressIfIdle()
 	u.emitProgress(folder)
 	u.emitErrorsLocked(folder)
 	u.mut.Unlock()
@@ -907,8 +1102,10 @@ func (u *cloudreveUploader) obsoletePath(folder, relPath string, recursive bool,
 				}
 				continue
 			}
+			state.dropTrackedBytes(file)
 			delete(state.files, path)
 		}
+		state.resetProgressIfIdle()
 		u.emitProgress(folder)
 		u.emitErrorsLocked(folder)
 	}
@@ -985,8 +1182,12 @@ func (u *cloudreveUploader) removeFile(folder, relPath string) {
 	if !ok {
 		return
 	}
+	if file, exists := state.files[relPath]; exists {
+		state.dropTrackedBytes(file)
+	}
 	delete(state.files, relPath)
 	delete(state.failed, relPath)
+	state.resetProgressIfIdle()
 	u.emitProgress(folder)
 	u.emitErrorsLocked(folder)
 }
@@ -1012,19 +1213,27 @@ func (u *cloudreveUploader) summaryLocked(folder string) cloudreveUploadSummary 
 	}
 
 	var summary cloudreveUploadSummary
+	summary.TotalBytes = state.progressTotalBytes
+	summary.DoneBytes = state.progressDoneBytes
 	for _, file := range state.files {
 		if !file.Queued && !file.Uploading {
 			continue
 		}
 		summary.TotalItems++
-		summary.TotalBytes += file.BytesTotal
-		summary.DoneBytes += file.BytesDone
+		done := file.BytesDone
+		if file.TrackedBytes > 0 && done > file.TrackedBytes {
+			done = file.TrackedBytes
+		}
+		summary.DoneBytes += done
 		if file.Queued {
 			summary.PendingItems++
 		}
 		if file.Uploading {
 			summary.UploadingItems++
 		}
+	}
+	if summary.DoneBytes > summary.TotalBytes {
+		summary.DoneBytes = summary.TotalBytes
 	}
 	return summary
 }
@@ -1046,6 +1255,49 @@ func (u *cloudreveUploader) emitErrorsLocked(folder string) {
 	})
 }
 
+func (u *cloudreveUploader) ensureRemoteFolder(ctx context.Context, cfg config.FolderConfiguration, cloudCfg config.CloudreveConfiguration, relPath string) error {
+	relPath = normalizeCloudreveDirectoryPath(relPath)
+
+	key := cfg.ID + "\x00" + relPath
+	for {
+		u.mut.Lock()
+		if u.isEnsuredDirLocked(cfg.ID, relPath) {
+			u.mut.Unlock()
+			return nil
+		}
+		if wait, ok := u.ensuringDirs[key]; ok {
+			u.mut.Unlock()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-wait:
+				continue
+			}
+		}
+		wait := make(chan struct{})
+		u.ensuringDirs[key] = wait
+		u.mut.Unlock()
+
+		var err error
+		if !u.acquireEnsureSlot(ctx) {
+			err = ctx.Err()
+		} else {
+			client := cloudreve.NewClient(cloudCfg.Server, cloudCfg.Token, nil)
+			err = client.EnsureFolder(ctx, cloudreve.JoinURI(u.cloudreveFolderRootURI(cfg, cloudCfg), relPath))
+			u.releaseEnsureSlot()
+		}
+
+		u.mut.Lock()
+		delete(u.ensuringDirs, key)
+		if err == nil {
+			u.markEnsuredDirLocked(cfg.ID, relPath)
+		}
+		close(wait)
+		u.mut.Unlock()
+		return err
+	}
+}
+
 func (u *cloudreveUploader) uploadWorkerCount(folder string, fallback int) int {
 	if cfg, ok := u.model.cfg.Folder(folder); ok && cfg.Cloudreve.HasCredentials() {
 		if workerCount := cfg.Cloudreve.Normalized().WorkerCount; workerCount > 0 {
@@ -1059,6 +1311,45 @@ func (u *cloudreveUploader) uploadWorkerCount(folder string, fallback int) int {
 		return fallback
 	}
 	return 1
+}
+
+func (u *cloudreveUploader) acquireEnsureSlot(ctx context.Context) bool {
+	for {
+		u.mut.Lock()
+		if u.activeEnsures < cloudreveEnsureWorkerCount {
+			u.activeEnsures++
+			u.mut.Unlock()
+			return true
+		}
+		u.mut.Unlock()
+
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return false
+		case <-u.ensureSlotsChanged:
+			if !timer.Stop() {
+				<-timer.C
+			}
+		case <-timer.C:
+		}
+	}
+}
+
+func (u *cloudreveUploader) releaseEnsureSlot() {
+	u.mut.Lock()
+	if u.activeEnsures > 0 {
+		u.activeEnsures--
+	}
+	u.mut.Unlock()
+
+	select {
+	case u.ensureSlotsChanged <- struct{}{}:
+	default:
+	}
 }
 
 func (u *cloudreveUploader) acquireUploadSlot(ctx context.Context, folder string, fallback int) bool {
@@ -1330,6 +1621,7 @@ func (u *cloudreveUploader) restorePending(ctx context.Context, folder string) {
 		slog.Warn("Cloudreve pending restore failed", slog.String("folder", folder), slogutil.Error(err))
 		return
 	}
+	runAsync := ctx.Err() == nil
 	for _, entry := range entries {
 		cfg, ok := u.model.cfg.Folder(entry.Folder)
 		if !ok || cfg.Type != config.FolderTypeUploadOnly || cfg.Paused {
@@ -1343,11 +1635,13 @@ func (u *cloudreveUploader) restorePending(ctx context.Context, folder string) {
 			if entry.Type != "file" {
 				continue
 			}
-			if u.enqueue(entry.Folder, entry.Path) {
-				go u.processJobLoop(ctx, uploadJob{folder: entry.Folder, path: entry.Path})
+			if u.enqueue(entry.Folder, entry.Path) && runAsync {
+				u.enqueueUploadJob(ctx, uploadJob{folder: entry.Folder, path: entry.Path})
 			}
 		case cloudrevePendingDelete, cloudrevePendingMkdir:
-			go u.processPendingEntry(ctx, entry)
+			if runAsync {
+				u.enqueuePendingEntry(ctx, entry)
+			}
 		}
 	}
 }
@@ -1383,7 +1677,23 @@ func (u *cloudreveUploader) processPendingEntry(ctx context.Context, entry cloud
 	slog.Warn(message, cfg.LogAttr(), slog.String("path", entry.Path), slogutil.Error(err))
 }
 
+func (u *cloudreveUploader) enqueuePendingEntry(ctx context.Context, entry cloudrevePendingEntry) bool {
+	return queueCloudreveWork(ctx, u.pendingQueue, entry)
+}
+
+func (u *cloudreveUploader) enqueueUploadJob(ctx context.Context, job uploadJob) bool {
+	return queueCloudreveWork(ctx, u.uploadQueue, job)
+}
+
 func (u *cloudreveUploader) syncDirectoryPending(ctx context.Context, cfg config.FolderConfiguration, entry cloudrevePendingEntry) error {
+	current, err := u.isCurrentPendingEntry(entry)
+	if err != nil {
+		return err
+	}
+	if !current {
+		return nil
+	}
+
 	cloudCfg, err := u.cloudreveConfig(ctx, cfg)
 	if err != nil {
 		return err
@@ -1391,8 +1701,7 @@ func (u *cloudreveUploader) syncDirectoryPending(ctx context.Context, cfg config
 	if !cloudCfg.IsReady() {
 		return nil
 	}
-	client := cloudreve.NewClient(cloudCfg.Server, cloudCfg.Token, nil)
-	if err := client.EnsureFolder(ctx, cloudreve.JoinURI(u.cloudreveFolderRootURI(cfg, cloudCfg), entry.Path)); err != nil {
+	if err := u.ensureRemoteFolder(ctx, cfg, cloudCfg, entry.Path); err != nil {
 		return err
 	}
 	if _, err := u.deletePendingIfCurrent(entry); err != nil {
@@ -1404,8 +1713,21 @@ func (u *cloudreveUploader) syncDirectoryPending(ctx context.Context, cfg config
 }
 
 func (u *cloudreveUploader) syncDeletePending(ctx context.Context, cfg config.FolderConfiguration, entry cloudrevePendingEntry) error {
+	current, err := u.isCurrentPendingEntry(entry)
+	if err != nil {
+		return err
+	}
+	if !current {
+		return nil
+	}
+
 	if err := u.deleteRemotePath(ctx, cfg, entry.Path); err != nil {
 		return err
+	}
+	if entry.Type == "dir" || entry.Recursive {
+		u.mut.Lock()
+		u.clearEnsuredDirLocked(entry.Folder, entry.Path, true)
+		u.mut.Unlock()
 	}
 	if _, err := u.deletePendingIfCurrent(entry); err != nil {
 		return err
@@ -1424,4 +1746,93 @@ func (u *cloudreveUploader) processCurrentDelete(ctx context.Context, cfg config
 		return nil
 	}
 	return u.syncDeletePending(ctx, cfg, entry)
+}
+
+func cloudreveUploadRetryDelay(attempt int) time.Duration {
+	if attempt <= 0 {
+		return cloudreveUploadRetryBaseDelay
+	}
+	delay := cloudreveUploadRetryBaseDelay
+	for i := 1; i < attempt; i++ {
+		if delay >= cloudreveUploadRetryMaxDelay/2 {
+			return cloudreveUploadRetryMaxDelay
+		}
+		delay *= 2
+	}
+	if delay > cloudreveUploadRetryMaxDelay {
+		return cloudreveUploadRetryMaxDelay
+	}
+	return delay
+}
+
+func sleepCloudreveRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func bufferCloudreveEvents(ctx context.Context, sub events.Subscription, size int) <-chan events.Event {
+	if size <= 0 {
+		return sub.C()
+	}
+
+	out := make(chan events.Event, size)
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-sub.C():
+				if !ok {
+					return
+				}
+				select {
+				case out <- ev:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return out
+}
+
+func startCloudreveWorkers(wg *sync.WaitGroup, ctx context.Context, count int, fn func()) {
+	if count <= 0 {
+		count = 1
+	}
+	for range count {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fn()
+		}()
+	}
+}
+
+func queueCloudreveWork[T any](ctx context.Context, ch chan T, item T) bool {
+	select {
+	case ch <- item:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (u *cloudreveUploader) isCurrentPendingEntry(entry cloudrevePendingEntry) (bool, error) {
+	current, ok, err := u.pendingEntry(entry.Folder, entry.Path)
+	if err != nil || !ok {
+		return false, err
+	}
+	return current.Action == entry.Action &&
+		current.Type == entry.Type &&
+		current.Sequence == entry.Sequence &&
+		current.Recursive == entry.Recursive, nil
 }

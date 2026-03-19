@@ -935,6 +935,13 @@ func TestGUIConfigURL(t *testing.T) {
 	}
 }
 
+func TestDefaultGUIAddress(t *testing.T) {
+	cfg := New(device1)
+	if got, want := cfg.GUI.RawAddress, "127.0.0.1:18384"; got != want {
+		t.Fatalf("unexpected default gui address: got %q want %q", got, want)
+	}
+}
+
 func TestGUIPasswordHash(t *testing.T) {
 	var c GUIConfiguration
 

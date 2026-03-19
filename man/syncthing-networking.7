@@ -137,8 +137,8 @@ Similarly there is also a \fBsyncthing\-gui\fP service.
 .SH REMOTE WEB GUI
 .sp
 To be able to access the web GUI from other computers, you need to change the
-\fIGUI Listen Address\fP setting from the default \fB127.0.0.1:8384\fP to
-\fB0.0.0.0:8384\fP\&. You also need to open the port in your local firewall if you
+\fIGUI Listen Address\fP setting from the default \fB127.0.0.1:18384\fP to
+\fB0.0.0.0:18384\fP\&. You also need to open the port in your local firewall if you
 have one.
 .SS Tunneling via SSH
 .sp
@@ -149,13 +149,13 @@ tunnel instead. You can start a tunnel with a command like the following:
 .INDENT 3.5
 .sp
 .EX
-ssh \-L 9999:localhost:8384 machine
+ssh \-L 9999:localhost:18384 machine
 .EE
 .UNINDENT
 .UNINDENT
 .sp
 This will bind to your local port 9999 and forward all connections from there to
-port 8384 on the target machine. This still works even if Syncthing is bound to
+port 18384 on the target machine. This still works even if Syncthing is bound to
 listen on localhost only.
 .SH VIA A PROXY
 .sp

@@ -27,7 +27,7 @@ func main() {
 	log.SetOutput(os.Stdout)
 	log.SetFlags(0)
 
-	target := flag.String("target", "localhost:8384", "Target Syncthing instance")
+	target := flag.String("target", "localhost:18384", "Target Syncthing instance")
 	types := flag.String("types", "", "Filter for specific event types (comma-separated)")
 	apikey := flag.String("apikey", "", "Syncthing API key")
 	flag.Parse()
