@@ -659,6 +659,50 @@ func TestReportDevice(t *testing.T) {
 	}
 }
 
+func TestListSyncthingDevices(t *testing.T) {
+	t.Parallel()
+
+	var (
+		method string
+		path   string
+		auth   string
+	)
+
+	now := time.Date(2026, time.March, 20, 12, 0, 0, 0, time.UTC)
+	client := NewClient("https://cloudreve.example", "token", &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			method = r.Method
+			path = r.URL.Path
+			auth = r.Header.Get("Authorization")
+			return newJSONResponse(http.StatusOK, `{"code":0,"data":{"devices":[{"device_id":"DEVICE-A","short_id":"AAAA","bind_uri":"cloudreve://my/docs","last_seen_at":"2026-03-20T12:00:00Z","online":true,"is_bound":true}]}}`), nil
+		}),
+	})
+
+	devices, err := client.ListSyncthingDevices(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if method != http.MethodGet {
+		t.Fatalf("expected GET request, got %q", method)
+	}
+	if path != "/api/v4/devices/syncthing" {
+		t.Fatalf("unexpected path: %q", path)
+	}
+	if auth != "Bearer token" {
+		t.Fatalf("unexpected auth header: %q", auth)
+	}
+	if len(devices) != 1 {
+		t.Fatalf("expected one device, got %#v", devices)
+	}
+	if devices[0].DeviceID != "DEVICE-A" || !devices[0].IsBound || !devices[0].Online {
+		t.Fatalf("unexpected device payload: %#v", devices[0])
+	}
+	if devices[0].LastSeenAt == nil || !devices[0].LastSeenAt.Equal(now) {
+		t.Fatalf("unexpected last_seen_at: %#v", devices[0].LastSeenAt)
+	}
+}
+
 func TestReportSyncActivity(t *testing.T) {
 	t.Parallel()
 

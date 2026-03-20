@@ -277,17 +277,18 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/browse", s.getSystemBrowse)             // current
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/cloudreve/profile", s.getSystemCloudreveProfile)
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/cloudreve/browse", s.getSystemCloudreveBrowse) // uri
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/connections", s.getSystemConnections)          // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/discovery", s.getSystemDiscovery)              // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/error", s.getSystemError)                      // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/paths", s.getSystemPaths)                      // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/ping", s.restPing)                             // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/status", s.getSystemStatus)                    // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/upgrade", s.getSystemUpgrade)                  // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/version", s.getSystemVersion)                  // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/loglevels", s.getSystemDebug)                  // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/log", s.getSystemLog)                          // [since]
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/log.txt", s.getSystemLogTxt)                   // [since]
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/cloudreve/traffic", s.getSystemCloudreveTraffic)
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/connections", s.getSystemConnections) // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/discovery", s.getSystemDiscovery)     // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/error", s.getSystemError)             // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/paths", s.getSystemPaths)             // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/ping", s.restPing)                    // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/status", s.getSystemStatus)           // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/upgrade", s.getSystemUpgrade)         // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/version", s.getSystemVersion)         // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/loglevels", s.getSystemDebug)         // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/log", s.getSystemLog)                 // [since]
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/log.txt", s.getSystemLogTxt)          // [since]
 
 	// The POST handlers
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/prio", s.postDBPrio)                          // folder file
@@ -1697,21 +1698,45 @@ type cloudreveBrowseResponse struct {
 	Directories []cloudreve.DirectoryEntry `json:"directories"`
 }
 
+type cloudreveTrafficResponse struct {
+	InBytesTotal  uint64 `json:"inBytesTotal"`
+	OutBytesTotal uint64 `json:"outBytesTotal"`
+}
+
 type cloudreveProfileResponse struct {
-	Configured      bool   `json:"configured"`
-	Authenticated   bool   `json:"authenticated"`
-	Server          string `json:"server,omitempty"`
-	UserName        string `json:"userName,omitempty"`
-	UserEmail       string `json:"userEmail,omitempty"`
-	UserGroup       string `json:"userGroup,omitempty"`
-	CanAccessPublic bool   `json:"canAccessPublic"`
+	Configured            bool   `json:"configured"`
+	Authenticated         bool   `json:"authenticated"`
+	Server                string `json:"server,omitempty"`
+	UserName              string `json:"userName,omitempty"`
+	UserEmail             string `json:"userEmail,omitempty"`
+	UserGroup             string `json:"userGroup,omitempty"`
+	CanAccessPublic       bool   `json:"canAccessPublic"`
+	CurrentDeviceID       string `json:"currentDeviceID,omitempty"`
+	CurrentDeviceBound    bool   `json:"currentDeviceBound"`
+	CurrentDeviceBindURI  string `json:"currentDeviceBindURI,omitempty"`
+	NeedsDeviceUnbind     bool   `json:"needsDeviceUnbind"`
+	BlockingDeviceID      string `json:"blockingDeviceID,omitempty"`
+	BlockingDeviceShortID string `json:"blockingDeviceShortID,omitempty"`
+	BlockingDeviceBindURI string `json:"blockingDeviceBindURI,omitempty"`
+	DeviceManagementURL   string `json:"deviceManagementURL,omitempty"`
+}
+
+type cloudreveBindingStatus struct {
+	CurrentDeviceBound    bool
+	CurrentDeviceBindURI  string
+	NeedsDeviceUnbind     bool
+	BlockingDeviceID      string
+	BlockingDeviceShortID string
+	BlockingDeviceBindURI string
 }
 
 func (s *service) getSystemCloudreveProfile(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfg.Options().Cloudreve.Normalized()
 	resp := cloudreveProfileResponse{
-		Configured: strings.TrimSpace(cfg.Server) != "",
-		Server:     strings.TrimSpace(cfg.Server),
+		Configured:          strings.TrimSpace(cfg.Server) != "",
+		Server:              strings.TrimSpace(cfg.Server),
+		CurrentDeviceID:     s.id.String(),
+		DeviceManagementURL: cloudreveDeviceManagementURL(cfg.Server),
 	}
 	if !resp.Configured {
 		sendJSON(w, resp)
@@ -1724,7 +1749,8 @@ func (s *service) getSystemCloudreveProfile(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	user, err := cloudreve.NewClient(cfg.Server, token, nil).CurrentUser(r.Context())
+	client := cloudreve.NewClient(cfg.Server, token, nil)
+	user, err := client.CurrentUser(r.Context())
 	if err != nil {
 		sendJSON(w, resp)
 		return
@@ -1735,7 +1761,74 @@ func (s *service) getSystemCloudreveProfile(w http.ResponseWriter, r *http.Reque
 	resp.UserEmail = strings.TrimSpace(user.Email)
 	resp.UserGroup = user.GroupName()
 	resp.CanAccessPublic = user.CanAccessPublic()
+
+	devices, err := client.ListSyncthingDevices(r.Context())
+	if err != nil {
+		slog.Debug("Failed to list Cloudreve Syncthing device bindings", slogutil.Error(err))
+		sendJSON(w, resp)
+		return
+	}
+
+	binding := summarizeCloudreveBindingStatus(s.id.String(), devices)
+	resp.CurrentDeviceBound = binding.CurrentDeviceBound
+	resp.CurrentDeviceBindURI = binding.CurrentDeviceBindURI
+	resp.NeedsDeviceUnbind = binding.NeedsDeviceUnbind
+	resp.BlockingDeviceID = binding.BlockingDeviceID
+	resp.BlockingDeviceShortID = binding.BlockingDeviceShortID
+	resp.BlockingDeviceBindURI = binding.BlockingDeviceBindURI
 	sendJSON(w, resp)
+}
+
+func summarizeCloudreveBindingStatus(currentDeviceID string, devices []cloudreve.SyncthingDevice) cloudreveBindingStatus {
+	currentDeviceID = strings.TrimSpace(currentDeviceID)
+	status := cloudreveBindingStatus{}
+	currentDeviceFound := false
+
+	// If the current device is already bound, the login flow can continue
+	// immediately without forcing the user through the bind wizard again.
+	for _, device := range devices {
+		deviceID := strings.TrimSpace(device.DeviceID)
+		if deviceID != currentDeviceID {
+			continue
+		}
+		currentDeviceFound = true
+		if device.IsBound {
+			status.CurrentDeviceBound = true
+			status.CurrentDeviceBindURI = strings.TrimSpace(device.BindURI)
+			return status
+		}
+	}
+
+	// Otherwise any other bound device blocks this client until the user unbinds
+	// it in Cloudreve, matching the single-bound-device workflow.
+	for _, device := range devices {
+		if !device.IsBound {
+			continue
+		}
+		deviceID := strings.TrimSpace(device.DeviceID)
+		if deviceID == "" || deviceID == currentDeviceID {
+			continue
+		}
+		status.NeedsDeviceUnbind = true
+		status.BlockingDeviceID = deviceID
+		status.BlockingDeviceShortID = strings.TrimSpace(device.ShortID)
+		status.BlockingDeviceBindURI = strings.TrimSpace(device.BindURI)
+		return status
+	}
+
+	if currentDeviceFound {
+		return status
+	}
+
+	return status
+}
+
+func cloudreveDeviceManagementURL(server string) string {
+	base := strings.TrimRight(strings.TrimSpace(server), "/")
+	if base == "" {
+		return ""
+	}
+	return base + "/connect?tab=syncthing"
 }
 
 func (s *service) getSystemCloudreveBrowse(w http.ResponseWriter, r *http.Request) {
@@ -1781,6 +1874,14 @@ func (s *service) getSystemCloudreveBrowse(w http.ResponseWriter, r *http.Reques
 		Current:     current,
 		Parent:      listing.Parent,
 		Directories: listing.Directories,
+	})
+}
+
+func (*service) getSystemCloudreveTraffic(w http.ResponseWriter, _ *http.Request) {
+	stats := cloudreve.SnapshotTrafficStats()
+	sendJSON(w, cloudreveTrafficResponse{
+		InBytesTotal:  stats.InBytesTotal,
+		OutBytesTotal: stats.OutBytesTotal,
 	})
 }
 

@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -41,6 +42,16 @@ type Client struct {
 	token      string
 	httpClient *http.Client
 }
+
+type TrafficStats struct {
+	InBytesTotal  uint64 `json:"inBytesTotal"`
+	OutBytesTotal uint64 `json:"outBytesTotal"`
+}
+
+// Track Cloudreve HTTP traffic so the GUI can surface request activity in the
+// device transfer rates even though it is outside the normal Syncthing links.
+var cloudreveTrafficInBytes atomic.Uint64
+var cloudreveTrafficOutBytes atomic.Uint64
 
 type StoragePolicy struct {
 	Type string `json:"type"`
@@ -117,6 +128,20 @@ type CurrentUser struct {
 	Email    string            `json:"email,omitempty"`
 	Nickname string            `json:"nickname,omitempty"`
 	Group    *CurrentUserGroup `json:"group,omitempty"`
+}
+
+type SyncthingDevice struct {
+	DeviceID   string     `json:"device_id"`
+	ShortID    string     `json:"short_id,omitempty"`
+	BindURI    string     `json:"bind_uri,omitempty"`
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+	LastSyncAt *time.Time `json:"last_sync_at,omitempty"`
+	Online     bool       `json:"online"`
+	IsBound    bool       `json:"is_bound"`
+}
+
+type listSyncthingDevicesResponse struct {
+	Devices []SyncthingDevice `json:"devices"`
 }
 
 type DeviceReportRequest struct {
@@ -209,6 +234,22 @@ func NewClient(server, token string, httpClient *http.Client) *Client {
 		baseURL:    strings.TrimRight(server, "/"),
 		token:      token,
 		httpClient: httpClient,
+	}
+}
+
+func SnapshotTrafficStats() TrafficStats {
+	return TrafficStats{
+		InBytesTotal:  cloudreveTrafficInBytes.Load(),
+		OutBytesTotal: cloudreveTrafficOutBytes.Load(),
+	}
+}
+
+func addTrafficStats(inBytes, outBytes int64) {
+	if inBytes > 0 {
+		cloudreveTrafficInBytes.Add(uint64(inBytes))
+	}
+	if outBytes > 0 {
+		cloudreveTrafficOutBytes.Add(uint64(outBytes))
 	}
 }
 
@@ -319,6 +360,17 @@ func (c *Client) CurrentUser(ctx context.Context) (CurrentUser, error) {
 		return CurrentUser{}, err
 	}
 	return user, nil
+}
+
+func (c *Client) ListSyncthingDevices(ctx context.Context) ([]SyncthingDevice, error) {
+	var resp listSyncthingDevicesResponse
+	if err := c.sendAPIRequest(ctx, http.MethodGet, c.baseURL+"/api/v4/devices/syncthing", nil, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Devices == nil {
+		return []SyncthingDevice{}, nil
+	}
+	return resp.Devices, nil
 }
 
 func cloudreveParentDirectory(uri string) *DirectoryEntry {
@@ -766,13 +818,25 @@ func (c *Client) sendAPIRequestWithHeaders(ctx context.Context, method, target s
 		return err
 	}
 	defer resp.Body.Close()
+	outBytes := req.ContentLength
+	if outBytes < 0 {
+		outBytes = 0
+	}
+	respData, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return readErr
+	}
+	addTrafficStats(int64(len(respData)), outBytes)
 	if resp.StatusCode/100 != 2 {
-		respText, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		respText := respData
+		if len(respText) > 4096 {
+			respText = respText[:4096]
+		}
 		return fmt.Errorf("cloudreve request failed: %s: %s", resp.Status, strings.TrimSpace(string(respText)))
 	}
 
 	var envelope apiResponse[json.RawMessage]
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+	if err := json.Unmarshal(respData, &envelope); err != nil {
 		return err
 	}
 	if envelope.Code != 0 {
@@ -817,13 +881,25 @@ func (c *Client) uploadRawChunkWithResponse(ctx context.Context, target, method 
 		return nil, err
 	}
 	defer resp.Body.Close()
+	outBytes := req.ContentLength
+	if outBytes < 0 {
+		outBytes = 0
+	}
+	respData, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return nil, readErr
+	}
+	addTrafficStats(int64(len(respData)), outBytes)
 	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		body := respData
+		if len(body) > 4096 {
+			body = body[:4096]
+		}
 		return nil, fmt.Errorf("cloudreve upload failed: %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 	if opts.expectAPIResponse {
 		var envelope apiResponse[json.RawMessage]
-		if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		if err := json.Unmarshal(respData, &envelope); err != nil {
 			return nil, err
 		}
 		if envelope.Code != 0 {
@@ -831,14 +907,10 @@ func (c *Client) uploadRawChunkWithResponse(ctx context.Context, target, method 
 		}
 		return envelope.Data, nil
 	}
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
 	if etag := resp.Header.Get("ETag"); etag != "" {
 		return []byte(etag), nil
 	}
-	return data, nil
+	return respData, nil
 }
 
 type uploadChunk struct {

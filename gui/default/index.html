@@ -689,11 +689,6 @@
                         <a href="#" class="toggler" ng-click="toggleUnits()">
                           <span>{{rateText(thisDeviceUploadRate())}}</span>
                           ({{connectionsTotal.outBytesTotal | binary}}B)
-                          <small ng-if="cloudreveUploadRate() > 0"><br/>
-                            <i class="text-muted">
-                              <span translate>Cloudreve Upload</span>: {{rateText(cloudreveUploadRate())}}
-                            </i>
-                          </small>
                           <small ng-if="config.options.maxSendKbps > 0"><br/>
                             <i class="text-muted"><span translate>Limit</span>:
                               <span ng-if="!metricRates">{{config.options.maxSendKbps*1024 | binary}}B/s</span>

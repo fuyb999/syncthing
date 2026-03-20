@@ -118,16 +118,16 @@
           <div class="row">
             <div class="col-md-6">
               <div class="form-group">
-                <label translate for="CloudreveServer">Cloudreve Server</label>
+                <label for="CloudreveServer">Cloudreve 地址</label>
                 <input id="CloudreveServer" class="form-control" type="text" ng-model="tmpOptions.cloudreve.server" placeholder="https://cloudreve.example.com" />
-                <p class="help-block" translate>Cloudreve server base URL.</p>
+                <p class="help-block">Cloudreve 站点基础地址。</p>
               </div>
             </div>
             <div class="col-md-6">
               <div class="form-group">
-                <label translate for="CloudreveToken">Cloudreve Token</label>
+                <label for="CloudreveToken">Cloudreve 令牌</label>
                 <input id="CloudreveToken" class="form-control" type="password" ng-model="tmpOptions.cloudreve.token" />
-                <p class="help-block" translate>Personal access token used for upload requests. Optional if Cloudreve OAuth is configured and authorized.</p>
+                <p class="help-block">上传请求使用的个人访问令牌。如果已经配置并完成 Cloudreve OAuth 授权，这里可以留空。</p>
               </div>
             </div>
           </div>
@@ -135,16 +135,16 @@
           <div class="row">
             <div class="col-md-6">
               <div class="form-group">
-                <label translate for="CloudreveOAuthClientID">Cloudreve OAuth Client ID</label>
+                <label for="CloudreveOAuthClientID">Cloudreve OAuth 客户端 ID</label>
                 <input id="CloudreveOAuthClientID" class="form-control" type="text" ng-model="tmpOptions.cloudreve.oauthClientID" />
-                <p class="help-block" translate>Client ID from the Cloudreve OAuth application.</p>
+                <p class="help-block">Cloudreve OAuth 应用中的客户端 ID。</p>
               </div>
             </div>
             <div class="col-md-6">
               <div class="form-group">
-                <label translate for="CloudreveOAuthClientSecret">Cloudreve OAuth Client Secret</label>
+                <label for="CloudreveOAuthClientSecret">Cloudreve OAuth 客户端密钥</label>
                 <input id="CloudreveOAuthClientSecret" class="form-control" type="password" ng-model="tmpOptions.cloudreve.oauthClientSecret" />
-                <p class="help-block" translate>Client secret from the Cloudreve OAuth application.</p>
+                <p class="help-block">Cloudreve OAuth 应用中的客户端密钥。</p>
               </div>
             </div>
           </div>
@@ -152,19 +152,19 @@
           <div class="row">
             <div class="col-md-6">
               <div class="form-group">
-                <label translate for="CloudreveOAuthScopes">Cloudreve OAuth Scopes</label>
+                <label for="CloudreveOAuthScopes">Cloudreve OAuth 授权范围</label>
                 <input id="CloudreveOAuthScopes" class="form-control" type="text" ng-model="tmpOptions.cloudreve.oauthScopes" placeholder="openid profile email offline_access Files.Read Files.Write" />
-                <p class="help-block" translate>Leave empty to use the recommended Cloudreve OAuth scopes.</p>
+                <p class="help-block">留空时使用推荐的 Cloudreve OAuth 授权范围。</p>
               </div>
             </div>
             <div class="col-md-6">
               <div class="form-group">
-                <label translate for="CloudreveOAuthCallback">Cloudreve OAuth Callback URL</label>
+                <label for="CloudreveOAuthCallback">Cloudreve OAuth 回调地址</label>
                 <input id="CloudreveOAuthCallback" class="form-control" type="text" ng-value="cloudreveOAuthCallbackURI()" readonly />
-                <p class="help-block" translate>Register this callback URL in your Cloudreve OAuth application before logging in.</p>
-                <p class="help-block" translate>After saving the OAuth settings, log out and use “Sign in with Cloudreve” on the login page to authorize Syncthing.</p>
-                <p class="help-block" ng-if="cloudreveAuth.authorized" translate translate-value-user="{{cloudreveAuth.userName || cloudreveAuth.userEmail}}">
-                  Cloudreve OAuth is currently authorized as {%user%}.
+                <p class="help-block">登录前，请先把这个回调地址注册到 Cloudreve OAuth 应用中。</p>
+                <p class="help-block">保存 OAuth 配置后，请先退出登录，再回到登录页使用“Cloudreve 登录”为 Syncthing 授权。</p>
+                <p class="help-block" ng-if="cloudreveAuth.authorized">
+                  当前 Cloudreve OAuth 已授权给 {{cloudreveAuth.userName || cloudreveAuth.userEmail}}。
                 </p>
               </div>
             </div>
@@ -173,27 +173,27 @@
           <div class="row">
             <div class="col-md-4">
               <div class="form-group">
-                <label translate for="CloudreveMountRoot">Cloudreve Storage Space</label>
+                <label for="CloudreveMountRoot">Cloudreve 空间</label>
                 <select id="CloudreveMountRoot" class="form-control" ng-model="cloudreveMount.root">
-                  <option value="cloudreve://my" translate>Personal Files</option>
-                  <option value="cloudreve://public" ng-if="cloudreveCanAccessPublic()" translate>Public Files</option>
+                  <option value="cloudreve://my">个人文件</option>
+                  <option value="cloudreve://public" ng-if="cloudreveCanAccessPublic()">公共文件</option>
                 </select>
-                <p class="help-block" translate>Choose whether uploads go to your personal Cloudreve files or the public file space.</p>
+                <p class="help-block">选择上传目标属于个人文件还是公共文件空间。</p>
               </div>
             </div>
             <div class="col-md-8">
               <div class="form-group">
-                <label translate for="CloudreveMountPath">Cloudreve Subpath</label>
+                <label for="CloudreveMountPath">Cloudreve 子目录</label>
                 <div class="input-group">
                   <input id="CloudreveMountPath" class="form-control" type="text" ng-model="cloudreveMount.path" placeholder="syncthing/uploads" />
                   <span class="input-group-btn">
                     <button type="button" class="btn btn-default btn-secondary" ng-click="openCloudreveDirectoryPicker()" ng-disabled="!tmpOptions.cloudreve.server">
-                      <span class="fas fa-folder-open"></span>&nbsp;<span translate>Browse</span>
+                      <span class="fas fa-folder-open"></span>&nbsp;<span>浏览</span>
                     </button>
                   </span>
                 </div>
-                <p class="help-block" translate>Enter a relative path after the selected Cloudreve root, or browse existing directories in Cloudreve.</p>
-                <p class="help-block" translate>Browsing requires a configured Cloudreve server plus either a token or an authorized OAuth session with Files.Read scope.</p>
+                <p class="help-block">填写所选 Cloudreve 根目录后的相对子目录，或者直接浏览 Cloudreve 中已有目录。</p>
+                <p class="help-block">浏览目录前，需要先配置 Cloudreve 地址，并提供令牌或完成带有 `Files.Read` 权限的 OAuth 授权。</p>
               </div>
             </div>
           </div>
@@ -201,16 +201,16 @@
           <div class="row">
             <div class="col-md-6">
               <div class="form-group">
-                <label translate for="CloudreveBaseURIPreview">Cloudreve Upload Mount</label>
+                <label for="CloudreveBaseURIPreview">Cloudreve 上传挂载点</label>
                 <input id="CloudreveBaseURIPreview" class="form-control" type="text" ng-value="cloudreveMount.preview" readonly />
-                <p class="help-block" translate>Syncthing writes this combined mount URI into the configuration and uses it as the upload destination root.</p>
+                <p class="help-block">Syncthing 会把这个组合后的挂载地址写入配置，并作为上传目标根目录。</p>
               </div>
             </div>
             <div class="col-md-6">
               <div class="form-group">
-                <label translate for="CloudreveWorkerCount">Upload Workers</label>
+                <label for="CloudreveWorkerCount">上传并发数</label>
                 <input id="CloudreveWorkerCount" class="form-control" type="number" min="1" ng-model="tmpOptions.cloudreve.workerCount" />
-                <p class="help-block" translate>Maximum number of concurrent uploads to Cloudreve shared by Upload Only folders.</p>
+                <p class="help-block">`Upload Only` 文件夹共享使用的 Cloudreve 最大并发上传数。</p>
               </div>
             </div>
           </div>
@@ -469,25 +469,25 @@
 
 </modal>
 
-<modal id="cloudreveBrowse" status="default" icon="fas fa-folder-open" heading="{{'Browse Cloudreve Directory' | translate}}" large="yes" closeable="yes">
+<modal id="cloudreveBrowse" status="default" icon="fas fa-folder-open" heading="{{cloudreveBrowse.promptMode ? '请选择 Cloudreve 同步目录' : '浏览 Cloudreve 目录'}}" large="yes" closeable="{{cloudreveBrowse.promptMode ? 'no' : 'yes'}}">
   <div class="modal-body">
-    <p class="alert alert-info" ng-if="cloudreveBrowse.promptMode" translate>Cloudreve login succeeded. Choose the upload bind directory now; Syncthing will save it automatically, and you can change it later in Settings.</p>
+    <p class="alert alert-info" ng-if="cloudreveBrowse.promptMode">登录成功，请先选择当前客户端要绑定的 Cloudreve 同步目录。保存后会自动写入配置，后续仍可在设置中调整。</p>
 
     <div class="row">
       <div class="col-md-4">
         <div class="form-group">
-          <label translate for="CloudreveBrowseRoot">Cloudreve Storage Space</label>
+          <label for="CloudreveBrowseRoot">Cloudreve 空间</label>
           <select id="CloudreveBrowseRoot" class="form-control" ng-model="cloudreveMount.root" ng-change="changeCloudreveBrowseRoot()" ng-disabled="cloudreveBrowse.loading || cloudreveBrowse.saving">
-            <option value="cloudreve://my" translate>Personal Files</option>
-            <option value="cloudreve://public" ng-if="cloudreveCanAccessPublic()" translate>Public Files</option>
+            <option value="cloudreve://my">个人文件</option>
+            <option value="cloudreve://public" ng-if="cloudreveCanAccessPublic()">公共文件</option>
           </select>
         </div>
       </div>
       <div class="col-md-8">
         <div class="form-group">
-          <label translate for="CloudreveBrowseCurrent">Current Cloudreve Directory</label>
+          <label for="CloudreveBrowseCurrent">当前目录</label>
           <input id="CloudreveBrowseCurrent" class="form-control" type="text" ng-value="cloudreveBrowse.current || cloudreveMount.preview" readonly />
-          <p class="help-block" translate>Only directories are shown here. Click a directory name to open it, or use the current directory as the upload mount path.</p>
+          <p class="help-block">这里只显示目录。点击目录名称可继续进入，也可以直接使用当前目录作为上传挂载点。</p>
         </div>
       </div>
     </div>
@@ -496,10 +496,10 @@
 
     <p>
       <button type="button" class="btn btn-default btn-secondary btn-sm" ng-click="loadCloudreveDirectory(cloudreveBrowse.parent.path)" ng-disabled="cloudreveBrowse.loading || cloudreveBrowse.saving || !cloudreveBrowse.parent || !cloudreveBrowse.parent.path">
-        <span class="fas fa-level-up-alt"></span>&nbsp;<span translate>Up One Level</span>
+        <span class="fas fa-level-up-alt"></span>&nbsp;<span>返回上一级</span>
       </button>
       <button type="button" class="btn btn-default btn-secondary btn-sm" ng-click="loadCloudreveDirectory(cloudreveBrowse.current || cloudreveMount.preview)" ng-disabled="cloudreveBrowse.loading || cloudreveBrowse.saving">
-        <span class="fas fa-redo"></span>&nbsp;<span translate>Refresh</span>
+        <span class="fas fa-redo"></span>&nbsp;<span>刷新</span>
       </button>
     </p>
 
@@ -507,19 +507,19 @@
       <table class="table table-striped table-hover">
         <thead>
           <tr>
-            <th translate>Directory</th>
-            <th class="text-right" translate>Action</th>
+            <th>目录</th>
+            <th class="text-right">操作</th>
           </tr>
         </thead>
         <tbody>
           <tr ng-if="cloudreveBrowse.loading">
-            <td colspan="2" translate>Loading directories...</td>
+            <td colspan="2">正在加载目录...</td>
           </tr>
           <tr ng-if="cloudreveBrowse.saving">
-            <td colspan="2" translate>Saving Cloudreve mount...</td>
+            <td colspan="2">正在保存同步目录...</td>
           </tr>
           <tr ng-if="!cloudreveBrowse.loading && !cloudreveBrowse.saving && cloudreveBrowse.directories.length === 0">
-            <td colspan="2" translate>No subdirectories found.</td>
+            <td colspan="2">当前目录下没有子目录。</td>
           </tr>
           <tr ng-repeat="directory in cloudreveBrowse.directories track by directory.path">
             <td>
@@ -529,7 +529,7 @@
             </td>
             <td class="text-right">
               <button type="button" class="btn btn-default btn-secondary btn-sm" ng-click="selectCloudreveDirectory(directory.path)" ng-disabled="cloudreveBrowse.saving">
-                <span class="fas fa-check"></span>&nbsp;<span translate>Use</span>
+                <span class="fas fa-check"></span>&nbsp;<span>选用</span>
               </button>
             </td>
           </tr>
@@ -540,10 +540,29 @@
 
   <div class="modal-footer">
     <button type="button" class="btn btn-primary btn-sm" ng-click="selectCurrentCloudreveDirectory()" ng-disabled="cloudreveBrowse.loading || cloudreveBrowse.saving">
-      <span class="fas fa-check"></span>&nbsp;<span translate>Use Current Directory</span>
+      <span class="fas fa-check"></span>&nbsp;<span>使用当前目录</span>
     </button>
-    <button type="button" class="btn btn-default btn-sm" data-dismiss="modal" ng-disabled="cloudreveBrowse.saving">
-      <span class="fas fa-times"></span>&nbsp;<span translate>Close</span>
+    <button type="button" class="btn btn-default btn-sm" data-dismiss="modal" ng-if="!cloudreveBrowse.promptMode" ng-disabled="cloudreveBrowse.saving">
+      <span class="fas fa-times"></span>&nbsp;<span>关闭</span>
+    </button>
+  </div>
+</modal>
+
+<modal id="cloudreveBindingRequired" status="warning" icon="fas fa-exclamation-triangle" heading="检测到已有绑定设备" large="no" closeable="no">
+  <div class="modal-body">
+    <p>当前 Cloudreve 账号下已有其他 Syncthing 设备处于绑定状态。请先到 Cloudreve 的设备管理页面解除绑定，解除前当前客户端不能继续操作。</p>
+    <p ng-if="cloudreveBlockingDeviceName()"><strong>已绑定设备：</strong>{{cloudreveBlockingDeviceName()}}</p>
+    <p ng-if="cloudreveProfile.blockingDeviceID && cloudreveProfile.blockingDeviceID !== cloudreveBlockingDeviceName()"><strong>设备 ID：</strong>{{cloudreveProfile.blockingDeviceID}}</p>
+    <p ng-if="cloudreveProfile.blockingDeviceBindURI"><strong>绑定目录：</strong>{{cloudreveProfile.blockingDeviceBindURI}}</p>
+    <p ng-if="cloudreveProfile.deviceManagementURL" class="text-muted">Cloudreve 设备管理：{{cloudreveProfile.deviceManagementURL}}</p>
+  </div>
+
+  <div class="modal-footer">
+    <button type="button" class="btn btn-primary btn-sm" ng-click="openCloudreveDeviceManagement()">
+      <span class="fas fa-external-link-alt"></span>&nbsp;<span>前往 Cloudreve 设备管理</span>
+    </button>
+    <button type="button" class="btn btn-default btn-sm" ng-click="refreshCloudreveBindingStatus()">
+      <span class="fas fa-redo"></span>&nbsp;<span>我已解除绑定，重新检查</span>
     </button>
   </div>
 </modal>

@@ -13,6 +13,7 @@ angular.module('syncthing.core')
         var cloudreveAutoLoginStarted = false;
         var cloudreveAutoMountPromptHandled = false;
         var cloudreveAutoMountPromptOpening = false;
+        var cloudreveTrafficRefreshPending = false;
         var cloudreveMountRoots = ['cloudreve://my', 'cloudreve://public'];
         var navigatingAway = false;
         var online = false;
@@ -220,6 +221,14 @@ angular.module('syncthing.core')
                 userEmail: '',
                 userGroup: '',
                 canAccessPublic: false,
+                currentDeviceID: '',
+                currentDeviceBound: false,
+                currentDeviceBindURI: '',
+                needsDeviceUnbind: false,
+                blockingDeviceID: '',
+                blockingDeviceShortID: '',
+                blockingDeviceBindURI: '',
+                deviceManagementURL: '',
             };
         }
 
@@ -247,6 +256,33 @@ angular.module('syncthing.core')
             }
         }
 
+        function cloudreveURIHasSubpath(uri) {
+            return !!parseCloudreveBaseURI(uri).path;
+        }
+
+        function cloudreveBindingRequiresUnbind() {
+            return !!($scope.cloudreveProfile &&
+                $scope.cloudreveProfile.loaded &&
+                !$scope.cloudreveProfile.currentDeviceBound &&
+                $scope.cloudreveProfile.needsDeviceUnbind);
+        }
+
+        function maybeHandleCloudreveBindingFlow() {
+            if (!$scope.authenticated || !$scope.cloudreveProfile || !$scope.cloudreveProfile.loaded) {
+                return;
+            }
+
+            if (cloudreveBindingRequiresUnbind()) {
+                cloudreveAutoMountPromptOpening = false;
+                hideModal('#cloudreveBrowse');
+                showModal('#cloudreveBindingRequired');
+                return;
+            }
+
+            hideModal('#cloudreveBindingRequired');
+            maybePromptCloudreveMountSelection();
+        }
+
         function clearCloudreveMountPrompt() {
             cloudreveAutoMountPromptOpening = false;
             cloudreveAutoMountPromptHandled = true;
@@ -265,18 +301,28 @@ angular.module('syncthing.core')
             if (!$scope.authenticated || cloudreveAutoMountPromptHandled || cloudreveAutoMountPromptOpening) {
                 return;
             }
-            if (stringsTrim($location.search().cloudreveMountPrompt) !== '1') {
-                return;
-            }
             if (isEmptyObject($scope.config) || !$scope.config.options || !$scope.config.options.cloudreve) {
                 return;
             }
             if (!$scope.cloudreveProfile || !$scope.cloudreveProfile.loaded) {
                 return;
             }
+            if (!$scope.cloudreveProfile.configured || !$scope.cloudreveProfile.authenticated) {
+                return;
+            }
+            if (cloudreveBindingRequiresUnbind()) {
+                return;
+            }
+            if ($scope.cloudreveProfile.currentDeviceBound && cloudreveURIHasSubpath($scope.config.options.cloudreve.baseURI)) {
+                clearCloudreveMountPrompt();
+                return;
+            }
 
             cloudreveAutoMountPromptOpening = true;
             var initialURI = $scope.config.options.cloudreve.baseURI || 'cloudreve://my';
+            if ($scope.cloudreveProfile.currentDeviceBindURI) {
+                initialURI = $scope.cloudreveProfile.currentDeviceBindURI;
+            }
             if (!effectiveCloudreveCanAccessPublic() && isCloudrevePublicURI(initialURI)) {
                 initialURI = buildCloudreveBaseURI('cloudreve://my', parseCloudreveBaseURI(initialURI).path);
             }
@@ -360,9 +406,13 @@ angular.module('syncthing.core')
         $scope.folderTransferRates = {};
         $scope.cloudreveTransfer = {
             byFolder: {},
+            inBytesTotal: 0,
             outBytesTotal: 0,
+            inbps: 0,
             outbps: 0,
+            lastInBytesTotal: 0,
             lastOutBytesTotal: 0,
+            lastInActiveAt: 0,
             lastRateAt: 0,
             lastActiveAt: 0,
             active: false,
@@ -1191,7 +1241,9 @@ angular.module('syncthing.core')
                     return;
                 }
                 $scope.$evalAsync(function () {
-                    updateCloudreveTransferRate(Date.now());
+                    refreshCloudreveTraffic().finally(function () {
+                        updateCloudreveTransferRate(Date.now());
+                    });
                 });
                 cloudreveRateTimer = $timeout(tick, cloudreveRateIntervalMs, false);
             };
@@ -1207,6 +1259,7 @@ angular.module('syncthing.core')
 
             if (!transfer.lastRateAt) {
                 transfer.lastRateAt = now;
+                transfer.lastInBytesTotal = transfer.inBytesTotal;
                 transfer.lastOutBytesTotal = transfer.outBytesTotal;
                 return;
             }
@@ -1216,21 +1269,34 @@ angular.module('syncthing.core')
                 return;
             }
 
-            var rawRate = 0;
-            rawRate = Math.max(0, (transfer.outBytesTotal - (transfer.lastOutBytesTotal || 0)) / td);
+            var rawInRate = Math.max(0, (transfer.inBytesTotal - (transfer.lastInBytesTotal || 0)) / td);
+            var rawOutRate = Math.max(0, (transfer.outBytesTotal - (transfer.lastOutBytesTotal || 0)) / td);
+            if (rawInRate > 0 && rawInRate < 1024) {
+                rawInRate = 1024;
+            }
             transfer.lastRateAt = now;
+            transfer.lastInBytesTotal = transfer.inBytesTotal;
             transfer.lastOutBytesTotal = transfer.outBytesTotal;
+
+            if (rawInRate > 0) {
+                if (transfer.inbps <= 0 || rawInRate > transfer.inbps * 1.5 || rawInRate < transfer.inbps * 0.5) {
+                    transfer.inbps = rawInRate;
+                } else {
+                    transfer.inbps = transfer.inbps * 0.3 + rawInRate * 0.7;
+                }
+            } else if (now - (transfer.lastInActiveAt || 0) >= cloudreveRateIntervalMs * 2) {
+                transfer.inbps = 0;
+            } else {
+                transfer.inbps *= 0.5;
+            }
 
             if (!transfer.active) {
                 transfer.outbps = 0;
-                return;
-            }
-
-            if (rawRate > 0) {
-                if (transfer.outbps <= 0 || rawRate > transfer.outbps * 1.5 || rawRate < transfer.outbps * 0.5) {
-                    transfer.outbps = rawRate;
+            } else if (rawOutRate > 0) {
+                if (transfer.outbps <= 0 || rawOutRate > transfer.outbps * 1.5 || rawOutRate < transfer.outbps * 0.5) {
+                    transfer.outbps = rawOutRate;
                 } else {
-                    transfer.outbps = transfer.outbps * 0.3 + rawRate * 0.7;
+                    transfer.outbps = transfer.outbps * 0.3 + rawOutRate * 0.7;
                 }
             } else if (now - (transfer.lastActiveAt || 0) >= cloudreveRateIntervalMs * 2) {
                 transfer.outbps = 0;
@@ -1238,6 +1304,9 @@ angular.module('syncthing.core')
                 transfer.outbps *= 0.5;
             }
 
+            if (transfer.inbps < 1) {
+                transfer.inbps = 0;
+            }
             if (transfer.outbps < 1) {
                 transfer.outbps = 0;
             }
@@ -1260,7 +1329,7 @@ angular.module('syncthing.core')
                 if (!$scope.login.cloudreveServer && $scope.cloudreveAuth.server) {
                     $scope.login.cloudreveServer = $scope.cloudreveAuth.server;
                 }
-                maybePromptCloudreveMountSelection();
+                maybeHandleCloudreveBindingFlow();
                 maybeAutoStartCloudreveLogin();
             }).error(function (response) {
                 $scope.cloudreveAuth = {
@@ -1269,7 +1338,7 @@ angular.module('syncthing.core')
                     canAccessPublic: false,
                 };
                 console.log('Failed to refresh Cloudreve OAuth status:', response);
-                maybePromptCloudreveMountSelection();
+                maybeHandleCloudreveBindingFlow();
                 maybeAutoStartCloudreveLogin();
             });
         }
@@ -1287,14 +1356,43 @@ angular.module('syncthing.core')
                     loaded: true,
                 });
                 enforceCloudreveMountAccess($scope.tmpOptions);
-                maybePromptCloudreveMountSelection();
+                maybeHandleCloudreveBindingFlow();
                 return $scope.cloudreveProfile;
             }).catch(function (response) {
                 $scope.cloudreveProfile = cloudreveProfileDefaults();
                 $scope.cloudreveProfile.loaded = true;
                 console.log('Failed to refresh Cloudreve profile:', response);
-                maybePromptCloudreveMountSelection();
+                maybeHandleCloudreveBindingFlow();
                 return $scope.cloudreveProfile;
+            });
+        }
+
+        function refreshCloudreveTraffic() {
+            if (!$scope.authenticated || cloudreveTrafficRefreshPending) {
+                return $q.when($scope.cloudreveTransfer);
+            }
+
+            cloudreveTrafficRefreshPending = true;
+            return $http.get(urlbase + '/system/cloudreve/traffic').then(function (response) {
+                var data = response.data || {};
+                var transfer = $scope.cloudreveTransfer;
+                var nextInBytesTotal = Math.max(0, data.inBytesTotal || 0);
+
+                if (nextInBytesTotal < transfer.inBytesTotal) {
+                    transfer.inbps = 0;
+                    transfer.lastInBytesTotal = 0;
+                }
+                if (nextInBytesTotal > transfer.inBytesTotal) {
+                    transfer.lastInActiveAt = Date.now();
+                }
+
+                transfer.inBytesTotal = nextInBytesTotal;
+                return transfer;
+            }).catch(function (response) {
+                console.log('Failed to refresh Cloudreve traffic:', response);
+                return $scope.cloudreveTransfer;
+            }).finally(function () {
+                cloudreveTrafficRefreshPending = false;
             });
         }
 
@@ -1313,7 +1411,7 @@ angular.module('syncthing.core')
                     refreshCloudreveProfile(),
                 ]);
             }).then(function () {
-                maybePromptCloudreveMountSelection();
+                maybeHandleCloudreveBindingFlow();
             });
         }
 
@@ -1852,8 +1950,13 @@ angular.module('syncthing.core')
             return ($scope.cloudreveTransfer && $scope.cloudreveTransfer.outbps) || 0;
         };
 
+        $scope.cloudreveDownloadRate = function () {
+            return ($scope.cloudreveTransfer && $scope.cloudreveTransfer.inbps) || 0;
+        };
+
         $scope.thisDeviceDownloadRate = function () {
-            return ($scope.connectionsTotal && $scope.connectionsTotal.inbps) || 0;
+            var base = ($scope.connectionsTotal && $scope.connectionsTotal.inbps) || 0;
+            return base + $scope.cloudreveDownloadRate();
         };
 
         $scope.thisDeviceUploadRate = function () {
@@ -2607,7 +2710,7 @@ angular.module('syncthing.core')
                 $scope.cloudreveBrowse.directories = data.directories || [];
             }).catch(function (response) {
                 var detail = httpErrorDetail(response);
-                $scope.cloudreveBrowse.error = detail || ('Cloudreve browse failed (' + (response.status || 0) + ').');
+                $scope.cloudreveBrowse.error = detail || ('浏览 Cloudreve 目录失败（' + (response.status || 0) + '）。');
                 if (!suppressHTTPError) {
                     $scope.emitHTTPError(response);
                 }
@@ -2619,6 +2722,26 @@ angular.module('syncthing.core')
 
         $scope.cloudreveCanAccessPublic = function () {
             return effectiveCloudreveCanAccessPublic();
+        };
+
+        $scope.cloudreveBindingRequiresUnbind = function () {
+            return cloudreveBindingRequiresUnbind();
+        };
+
+        $scope.cloudreveBlockingDeviceName = function () {
+            return stringsTrim($scope.cloudreveProfile.blockingDeviceShortID) || stringsTrim($scope.cloudreveProfile.blockingDeviceID);
+        };
+
+        $scope.openCloudreveDeviceManagement = function () {
+            var target = stringsTrim($scope.cloudreveProfile.deviceManagementURL) || stringsTrim($scope.cloudreveProfile.server);
+            if (!target) {
+                return;
+            }
+            window.open(target, '_blank', 'noopener');
+        };
+
+        $scope.refreshCloudreveBindingStatus = function () {
+            return refreshCloudreveProfile();
         };
 
         $scope.changeCloudreveBrowseRoot = function () {
@@ -2633,6 +2756,11 @@ angular.module('syncthing.core')
         function saveCloudreveMountSelection(uri) {
             var cloudCfg = $scope.config && $scope.config.options && $scope.config.options.cloudreve;
             if (!cloudCfg) {
+                return $q.when();
+            }
+
+            if ($scope.cloudreveBrowse && $scope.cloudreveBrowse.promptMode && !cloudreveURIHasSubpath(uri)) {
+                $scope.cloudreveBrowse.error = '请先选择一个具体子目录，不能直接使用 Cloudreve 空间根目录。';
                 return $q.when();
             }
 
@@ -2651,6 +2779,10 @@ angular.module('syncthing.core')
         }
 
         $scope.openCloudreveDirectoryPicker = function (promptMode) {
+            if (cloudreveBindingRequiresUnbind()) {
+                showModal('#cloudreveBindingRequired');
+                return $q.when();
+            }
             syncCloudreveMountBaseURI($scope.tmpOptions);
             $scope.cloudreveBrowse = {
                 current: '',
