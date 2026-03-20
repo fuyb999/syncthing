@@ -36,23 +36,27 @@ var ErrOAuthNotConfigured = errors.New("cloudreve oauth is not configured")
 var ErrOAuthNotAuthorized = errors.New("cloudreve oauth is not authorized")
 
 type OAuthSession struct {
-	AccessToken    string    `json:"accessToken"`
-	RefreshToken   string    `json:"refreshToken"`
-	AccessExpires  time.Time `json:"accessExpires"`
-	RefreshExpires time.Time `json:"refreshExpires"`
-	Scope          string    `json:"scope,omitempty"`
-	UserSub        string    `json:"userSub,omitempty"`
-	UserName       string    `json:"userName,omitempty"`
-	UserEmail      string    `json:"userEmail,omitempty"`
+	AccessToken     string    `json:"accessToken"`
+	RefreshToken    string    `json:"refreshToken"`
+	AccessExpires   time.Time `json:"accessExpires"`
+	RefreshExpires  time.Time `json:"refreshExpires"`
+	Scope           string    `json:"scope,omitempty"`
+	UserSub         string    `json:"userSub,omitempty"`
+	UserName        string    `json:"userName,omitempty"`
+	UserEmail       string    `json:"userEmail,omitempty"`
+	UserGroup       string    `json:"userGroup,omitempty"`
+	CanAccessPublic bool      `json:"canAccessPublic,omitempty"`
 }
 
 type OAuthStatus struct {
-	Available  bool   `json:"available"`
-	Authorized bool   `json:"authorized"`
-	Server     string `json:"server,omitempty"`
-	UserName   string `json:"userName,omitempty"`
-	UserEmail  string `json:"userEmail,omitempty"`
-	Scope      string `json:"scope,omitempty"`
+	Available       bool   `json:"available"`
+	Authorized      bool   `json:"authorized"`
+	Server          string `json:"server,omitempty"`
+	UserName        string `json:"userName,omitempty"`
+	UserEmail       string `json:"userEmail,omitempty"`
+	UserGroup       string `json:"userGroup,omitempty"`
+	Scope           string `json:"scope,omitempty"`
+	CanAccessPublic bool   `json:"canAccessPublic"`
 }
 
 type oauthTokenExchangeResponse struct {
@@ -130,7 +134,9 @@ func (m *OAuthManager) Status() OAuthStatus {
 		status.Authorized = true
 		status.UserName = session.UserName
 		status.UserEmail = session.UserEmail
+		status.UserGroup = session.UserGroup
 		status.Scope = session.Scope
+		status.CanAccessPublic = session.CanAccessPublic
 	}
 	return status
 }
@@ -223,6 +229,10 @@ func (m *OAuthManager) ExchangeCode(ctx context.Context, code string, redirectUR
 		UserSub:        userInfo.Sub,
 		UserName:       firstNonEmpty(userInfo.PreferredUsername, userInfo.Name, userInfo.Email, userInfo.Sub),
 		UserEmail:      userInfo.Email,
+	}
+	if currentUser, err := NewClient(cfg.Server, tokenResp.AccessToken, m.httpClient).CurrentUser(ctx); err == nil {
+		session.UserGroup = currentUser.GroupName()
+		session.CanAccessPublic = currentUser.CanAccessPublic()
 	}
 	if err := m.SaveSession(session); err != nil {
 		return OAuthSession{}, err
@@ -456,8 +466,8 @@ func oauthScopes(cfg config.CloudreveConfiguration) string {
 		fields = strings.Fields(config.DefaultCloudreveOAuthScopes)
 	}
 
-	seen := make(map[string]struct{}, len(fields)+3)
-	result := make([]string, 0, len(fields)+3)
+	seen := make(map[string]struct{}, len(fields)+4)
+	result := make([]string, 0, len(fields)+4)
 	for _, scope := range fields {
 		scope = strings.TrimSpace(scope)
 		if scope == "" {
@@ -470,7 +480,7 @@ func oauthScopes(cfg config.CloudreveConfiguration) string {
 		result = append(result, scope)
 	}
 
-	for _, required := range []string{"openid", "offline_access", "Files.Write"} {
+	for _, required := range []string{"openid", "offline_access", "UserInfo.Read", "Files.Read", "Files.Write"} {
 		if _, ok := seen[required]; ok {
 			continue
 		}

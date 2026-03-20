@@ -8,6 +8,7 @@ package cloudreve
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"encoding/xml"
@@ -19,6 +20,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +32,8 @@ const uploadProgressInterval = 500 * time.Millisecond
 
 const cloudreveErrorObjectExisted = 40004
 const cloudreveErrorDBOperationFailed = 50001
+const cloudreveErrorSyncthingIPConflict = 40090
+const cloudreveErrorSyncthingDeviceNotRegistered = 40091
 const cloudreveClientIDHeader = "X-Cr-Client-Id"
 
 type Client struct {
@@ -95,6 +99,26 @@ type deleteFileRequest struct {
 	SkipSoftDelete bool     `json:"skip_soft_delete"`
 }
 
+type DirectoryEntry struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+type DirectoryListing struct {
+	Parent      *DirectoryEntry  `json:"parent,omitempty"`
+	Directories []DirectoryEntry `json:"directories"`
+}
+
+type CurrentUserGroup struct {
+	Name string `json:"name"`
+}
+
+type CurrentUser struct {
+	Email    string            `json:"email,omitempty"`
+	Nickname string            `json:"nickname,omitempty"`
+	Group    *CurrentUserGroup `json:"group,omitempty"`
+}
+
 type DeviceReportRequest struct {
 	DeviceID      string         `json:"device_id"`
 	ShortID       string         `json:"short_id"`
@@ -111,6 +135,11 @@ type DeviceHeartbeatRequest struct {
 	BindURI  string `json:"bind_uri,omitempty"`
 }
 
+type DeviceReportResponse struct {
+	RestoreConfig       map[string]any `json:"restore_config,omitempty"`
+	RestoreFromDeviceID string         `json:"restore_from_device_id,omitempty"`
+}
+
 type DeviceActivityRequest struct {
 	DeviceID string    `json:"device_id"`
 	ShortID  string    `json:"short_id,omitempty"`
@@ -120,6 +149,22 @@ type DeviceActivityRequest struct {
 
 type qiniuChunkResponse struct {
 	ETag string `json:"etag"`
+}
+
+type listDirectoryItem struct {
+	Type int    `json:"type"`
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+type listDirectoryPagination struct {
+	NextPageToken string `json:"next_token,omitempty"`
+}
+
+type listDirectoryResponse struct {
+	Files      []listDirectoryItem      `json:"files"`
+	Parent     listDirectoryItem        `json:"parent,omitempty"`
+	Pagination *listDirectoryPagination `json:"pagination,omitempty"`
 }
 
 type qiniuCompleteRequest struct {
@@ -201,10 +246,127 @@ func (c *Client) Delete(ctx context.Context, uris ...string) error {
 	return err
 }
 
-func (c *Client) ReportDevice(ctx context.Context, req DeviceReportRequest) error {
-	return c.sendJSONWithHeaders(ctx, http.MethodPut, "/api/v4/devices/syncthing/report", req, nil, map[string]string{
+func (c *Client) ListDirectories(ctx context.Context, uri string) (DirectoryListing, error) {
+	uri = strings.TrimSpace(uri)
+	if uri == "" {
+		return DirectoryListing{}, errors.New("cloudreve browse uri cannot be empty")
+	}
+
+	listing := DirectoryListing{
+		Directories: []DirectoryEntry{},
+	}
+	if parent := cloudreveParentDirectory(uri); parent != nil {
+		listing.Parent = parent
+	}
+	seen := make(map[string]struct{})
+	nextToken := ""
+
+	for {
+		target, err := addQuery(c.baseURL+"/api/v4/file", "uri", uri)
+		if err != nil {
+			return DirectoryListing{}, err
+		}
+		target, err = addQuery(target, "page_size", "1000")
+		if err != nil {
+			return DirectoryListing{}, err
+		}
+		if nextToken == "" {
+			target, err = addQuery(target, "page", "1")
+		} else {
+			target, err = addQuery(target, "next_page_token", nextToken)
+		}
+		if err != nil {
+			return DirectoryListing{}, err
+		}
+
+		var resp listDirectoryResponse
+		if err := c.sendAPIRequest(ctx, http.MethodGet, target, nil, &resp); err != nil {
+			return DirectoryListing{}, err
+		}
+		for _, item := range resp.Files {
+			if item.Type != 1 || strings.TrimSpace(item.Path) == "" {
+				continue
+			}
+			if _, ok := seen[item.Path]; ok {
+				continue
+			}
+			seen[item.Path] = struct{}{}
+			listing.Directories = append(listing.Directories, DirectoryEntry{
+				Name: item.Name,
+				Path: item.Path,
+			})
+		}
+
+		if resp.Pagination == nil || strings.TrimSpace(resp.Pagination.NextPageToken) == "" {
+			break
+		}
+		nextToken = strings.TrimSpace(resp.Pagination.NextPageToken)
+	}
+
+	slices.SortFunc(listing.Directories, func(a, b DirectoryEntry) int {
+		if diff := cmp.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name)); diff != 0 {
+			return diff
+		}
+		return cmp.Compare(a.Path, b.Path)
+	})
+
+	return listing, nil
+}
+
+func (c *Client) CurrentUser(ctx context.Context) (CurrentUser, error) {
+	var user CurrentUser
+	if err := c.sendAPIRequest(ctx, http.MethodGet, c.baseURL+"/api/v4/user/me", nil, &user); err != nil {
+		return CurrentUser{}, err
+	}
+	return user, nil
+}
+
+func cloudreveParentDirectory(uri string) *DirectoryEntry {
+	parentURI := cloudreveParentURI(uri)
+	if parentURI == "" {
+		return nil
+	}
+	return &DirectoryEntry{Path: parentURI}
+}
+
+func cloudreveParentURI(uri string) string {
+	u, err := url.Parse(strings.TrimSpace(uri))
+	if err != nil || strings.TrimSpace(u.Scheme) == "" || strings.TrimSpace(u.Host) == "" {
+		return ""
+	}
+
+	currentPath := strings.TrimSuffix(u.EscapedPath(), "/")
+	if currentPath == "" || currentPath == "/" {
+		return ""
+	}
+
+	parentPath := path.Dir(currentPath)
+	if parentPath == "." || parentPath == "/" {
+		return fmt.Sprintf("%s://%s", u.Scheme, u.Host)
+	}
+	return fmt.Sprintf("%s://%s%s", u.Scheme, u.Host, parentPath)
+}
+
+func (u CurrentUser) GroupName() string {
+	if u.Group == nil {
+		return ""
+	}
+	return strings.TrimSpace(u.Group.Name)
+}
+
+func (u CurrentUser) CanAccessPublic() bool {
+	return strings.EqualFold(u.GroupName(), "admin")
+}
+
+func (c *Client) ReportDevice(ctx context.Context, req DeviceReportRequest) (DeviceReportResponse, error) {
+	var resp DeviceReportResponse
+	err := c.sendJSONWithHeaders(ctx, http.MethodPut, "/api/v4/devices/syncthing/report", req, &resp, map[string]string{
 		cloudreveClientIDHeader: strings.TrimSpace(req.DeviceID),
 	})
+	if err != nil {
+		return DeviceReportResponse{}, err
+	}
+	return resp, nil
 }
 
 func (c *Client) HeartbeatDevice(ctx context.Context, req DeviceHeartbeatRequest) error {
@@ -294,6 +456,14 @@ func isAPIErrorCode(err error, code int) bool {
 
 func IsRetryableError(err error) bool {
 	return isAPIErrorCode(err, cloudreveErrorDBOperationFailed)
+}
+
+func IsDeviceRegistrationConflict(err error) bool {
+	return isAPIErrorCode(err, cloudreveErrorSyncthingIPConflict)
+}
+
+func IsDeviceNotRegistered(err error) bool {
+	return isAPIErrorCode(err, cloudreveErrorSyncthingDeviceNotRegistered)
 }
 
 func (c *Client) uploadLocalChunks(ctx context.Context, session uploadSession, src io.Reader, total, chunkSize int64, progress func(done, total int64)) error {

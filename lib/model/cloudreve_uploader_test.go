@@ -348,6 +348,122 @@ func TestCloudreveUploaderSummaryKeepsCompletedBytesUntilBatchFinishes(t *testin
 	}
 }
 
+func TestCloudreveUploaderApplyRestoredConfigRewritesLocalDeviceID(t *testing.T) {
+	uploader, wrapper, _ := newCloudreveUploaderTestHarness(t)
+
+	restoredCfg := config.New(device1)
+	restoredCfg.GUI.RawAddress = "127.0.0.1:19090"
+	restoredCfg.Options.RawListenAddresses = []string{"tcp://0.0.0.0:25000"}
+	restoredCfg.Defaults.Device.DeviceID = device1
+	restoredCfg.Defaults.Device.IntroducedBy = device1
+	restoredCfg.Defaults.Folder.FilesystemType = config.FilesystemTypeFake
+	restoredCfg.Defaults.Folder.Path = "restored-default?content=true"
+	restoredCfg.Defaults.Folder.Devices = []config.FolderDeviceConfiguration{
+		{DeviceID: device1},
+		{DeviceID: device2, IntroducedBy: device1},
+	}
+	restoredCfg.SetDevice(newDeviceConfiguration(restoredCfg.Defaults.Device, device2, "device2"))
+	restoredCfg.Devices[1].IntroducedBy = device1
+
+	folder := restoredCfg.Defaults.Folder.Copy()
+	folder.ID = "restored"
+	folder.Label = "restored"
+	folder.Path = "restored-folder?content=true"
+	folder.Devices = []config.FolderDeviceConfiguration{
+		{DeviceID: device1},
+		{DeviceID: device2, IntroducedBy: device1},
+	}
+	restoredCfg.SetFolder(folder)
+
+	payload, err := json.Marshal(restoredCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var snapshot map[string]any
+	if err := json.Unmarshal(payload, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := uploader.applyRestoredConfig(cloudreve.DeviceReportResponse{
+		RestoreConfig:       snapshot,
+		RestoreFromDeviceID: device1.String(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := wrapper.RawCopy()
+	if got.GUI.RawAddress != "127.0.0.1:19090" {
+		t.Fatalf("expected restored gui address, got %#v", got.GUI)
+	}
+	if _, _, ok := got.Device(device1); ok {
+		t.Fatalf("expected old local device id to be replaced, got %#v", got.Devices)
+	}
+	if _, _, ok := got.Device(myID); !ok {
+		t.Fatalf("expected current device to exist after restore, got %#v", got.Devices)
+	}
+	if _, _, ok := got.Device(device2); !ok {
+		t.Fatalf("expected remote device to remain present after restore, got %#v", got.Devices)
+	}
+	if got.Defaults.Device.DeviceID == device1 || got.Defaults.Device.IntroducedBy == device1 {
+		t.Fatalf("expected defaults device to be rewritten, got %#v", got.Defaults.Device)
+	}
+	if len(got.Folders) != 1 {
+		t.Fatalf("expected restored folder to be applied, got %#v", got.Folders)
+	}
+	if folderDevice, ok := got.Folders[0].Device(myID); !ok {
+		t.Fatalf("expected folder to include current device after restore, got %#v", got.Folders[0].Devices)
+	} else if folderDevice.DeviceID != myID {
+		t.Fatalf("expected folder local device to be rewritten, got %#v", got.Folders[0].Devices)
+	}
+	if _, ok := got.Folders[0].Device(device2); !ok {
+		t.Fatalf("expected folder remote device to remain present after restore, got %#v", got.Folders[0].Devices)
+	}
+	for _, folderDevice := range got.Folders[0].Devices {
+		if folderDevice.DeviceID == device1 || folderDevice.IntroducedBy == device1 {
+			t.Fatalf("expected restored folder devices to stop referencing the old local device, got %#v", got.Folders[0].Devices)
+		}
+	}
+	for _, folderDevice := range got.Defaults.Folder.Devices {
+		if folderDevice.DeviceID == device1 || folderDevice.IntroducedBy == device1 {
+			t.Fatalf("expected default folder devices to be rewritten, got %#v", got.Defaults.Folder.Devices)
+		}
+	}
+}
+
+func TestCloudreveUploaderRunHeartbeatRequestsReRegistrationWhenDeviceIsUnbound(t *testing.T) {
+	uploader, wrapper, _ := newCloudreveUploaderTestHarness(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v4/devices/syncthing/heartbeat" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 40091,
+			"msg":  "device not registered",
+		})
+	}))
+	defer srv.Close()
+
+	waiter, err := wrapper.Modify(func(cfg *config.Configuration) {
+		cfg.Options.Cloudreve.Server = srv.URL
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiter.Wait()
+
+	if err := uploader.runHeartbeat(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-uploader.reportRequests:
+	case <-time.After(time.Second):
+		t.Fatal("expected heartbeat to request device re-registration")
+	}
+}
+
 func TestBufferCloudreveEventsDrainsBurstWithoutLoss(t *testing.T) {
 	logger := events.NewLogger()
 	ctx, cancel := context.WithCancel(context.Background())

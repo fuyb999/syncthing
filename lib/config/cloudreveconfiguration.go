@@ -11,7 +11,7 @@ import "strings"
 const (
 	DefaultCloudreveOAuthClientID     = "5367e9c5-4711-440a-b440-0e1ff8cbb2d6"
 	DefaultCloudreveOAuthClientSecret = "cOdExnJuMTCF7qTNAUPYTRtWa6BlMADw"
-	DefaultCloudreveOAuthScopes       = "profile email openid offline_access UserInfo.Write Workflow.Write Files.Write Shares.Write"
+	DefaultCloudreveOAuthScopes       = "profile email openid offline_access UserInfo.Read UserInfo.Write Workflow.Write Files.Read Files.Write Shares.Write"
 )
 
 type CloudreveConfiguration struct {
@@ -47,7 +47,7 @@ func (c CloudreveConfiguration) HasOAuthCredentials() bool {
 
 func (c *CloudreveConfiguration) prepare() {
 	if c.BaseURI == "" {
-		c.BaseURI = "cloudreve://syncthing"
+		c.BaseURI = "cloudreve://my"
 	}
 	if c.WorkerCount < 1 {
 		c.WorkerCount = 2

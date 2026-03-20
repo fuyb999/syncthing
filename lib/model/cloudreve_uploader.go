@@ -7,6 +7,7 @@
 package model
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -229,7 +230,14 @@ func (u *cloudreveUploader) reportLoop(ctx context.Context) error {
 			return nil
 		case <-u.reportRequests:
 			if err := u.runDeviceReport(ctx); err != nil {
-				slog.Warn("Cloudreve device report failed", slogutil.Error(err))
+				if cloudreve.IsDeviceRegistrationConflict(err) {
+					slog.Error(
+						"Cloudreve device registration is blocked because another device with the same IP is still bound. Unbind the old device on the Cloudreve devices page and wait for automatic re-registration.",
+						slogutil.Error(err),
+					)
+				} else {
+					slog.Warn("Cloudreve device report failed", slogutil.Error(err))
+				}
 			}
 		case <-heartbeatTicker.C:
 			if err := u.runHeartbeat(ctx); err != nil {
@@ -282,13 +290,23 @@ func (u *cloudreveUploader) runDeviceReport(parent context.Context) error {
 func (u *cloudreveUploader) runHeartbeat(parent context.Context) error {
 	ctx, cancel := context.WithTimeout(parent, cloudreveDeviceReportTimeout)
 	defer cancel()
-	return u.reportHeartbeat(ctx)
+	err := u.reportHeartbeat(ctx)
+	if cloudreve.IsDeviceNotRegistered(err) {
+		u.requestDeviceReport()
+		return nil
+	}
+	return err
 }
 
 func (u *cloudreveUploader) runSyncActivity(parent context.Context, syncAt time.Time) error {
 	ctx, cancel := context.WithTimeout(parent, cloudreveDeviceReportTimeout)
 	defer cancel()
-	return u.reportSyncActivity(ctx, syncAt)
+	err := u.reportSyncActivity(ctx, syncAt)
+	if cloudreve.IsDeviceNotRegistered(err) {
+		u.requestDeviceReport()
+		return nil
+	}
+	return err
 }
 
 func (u *cloudreveUploader) reportDevice(ctx context.Context) error {
@@ -302,7 +320,7 @@ func (u *cloudreveUploader) reportDevice(ctx context.Context) error {
 		return err
 	}
 
-	return client.ReportDevice(ctx, cloudreve.DeviceReportRequest{
+	resp, err := client.ReportDevice(ctx, cloudreve.DeviceReportRequest{
 		DeviceID:      u.model.id.String(),
 		ShortID:       u.model.shortID.String(),
 		APIKey:        strings.TrimSpace(u.model.cfg.GUI().APIKey),
@@ -311,6 +329,11 @@ func (u *cloudreveUploader) reportDevice(ctx context.Context) error {
 		ClientVersion: build.Version,
 		Platform:      runtime.GOOS + "/" + runtime.GOARCH,
 	})
+	if err != nil {
+		return err
+	}
+
+	return u.applyRestoredConfig(resp)
 }
 
 func (u *cloudreveUploader) reportHeartbeat(ctx context.Context) error {
@@ -380,6 +403,45 @@ func (u *cloudreveUploader) deviceBindURI(cloudCfg config.CloudreveConfiguration
 	return strings.TrimSpace(cloudCfg.BaseURI)
 }
 
+func (u *cloudreveUploader) applyRestoredConfig(resp cloudreve.DeviceReportResponse) error {
+	if len(resp.RestoreConfig) == 0 {
+		return nil
+	}
+
+	restoreFromText := strings.TrimSpace(resp.RestoreFromDeviceID)
+	if restoreFromText == "" {
+		return errors.New("cloudreve restore config missing restore_from_device_id")
+	}
+
+	restoreFrom, err := protocol.DeviceIDFromString(restoreFromText)
+	if err != nil {
+		return fmt.Errorf("cloudreve restore config has invalid restore_from_device_id: %w", err)
+	}
+
+	payload, err := json.Marshal(resp.RestoreConfig)
+	if err != nil {
+		return fmt.Errorf("marshal cloudreve restore config: %w", err)
+	}
+
+	restoredCfg, err := config.ReadJSON(bytes.NewReader(payload), restoreFrom)
+	if err != nil {
+		return fmt.Errorf("decode cloudreve restore config: %w", err)
+	}
+
+	replaceCloudreveRestoredDeviceID(&restoredCfg, restoreFrom, u.model.id)
+
+	waiter, err := u.model.cfg.Modify(func(cfg *config.Configuration) {
+		*cfg = restoredCfg
+	})
+	if err != nil {
+		return fmt.Errorf("apply cloudreve restore config: %w", err)
+	}
+	waiter.Wait()
+
+	slog.Info("Applied restored Syncthing configuration from Cloudreve", slog.String("sourceDeviceID", restoreFrom.String()))
+	return nil
+}
+
 func filterCloudreveReportError(err error) error {
 	if err == nil {
 		return nil
@@ -391,6 +453,54 @@ func filterCloudreveReportError(err error) error {
 		return nil
 	}
 	return err
+}
+
+func replaceCloudreveRestoredDeviceID(cfg *config.Configuration, from, to protocol.DeviceID) {
+	if from == to {
+		return
+	}
+
+	for i := range cfg.Devices {
+		if cfg.Devices[i].DeviceID == from {
+			cfg.Devices[i].DeviceID = to
+		}
+		if cfg.Devices[i].IntroducedBy == from {
+			cfg.Devices[i].IntroducedBy = to
+		}
+	}
+
+	for i := range cfg.Folders {
+		for j := range cfg.Folders[i].Devices {
+			if cfg.Folders[i].Devices[j].DeviceID == from {
+				cfg.Folders[i].Devices[j].DeviceID = to
+			}
+			if cfg.Folders[i].Devices[j].IntroducedBy == from {
+				cfg.Folders[i].Devices[j].IntroducedBy = to
+			}
+		}
+	}
+
+	if cfg.Defaults.Device.DeviceID == from {
+		cfg.Defaults.Device.DeviceID = to
+	}
+	if cfg.Defaults.Device.IntroducedBy == from {
+		cfg.Defaults.Device.IntroducedBy = to
+	}
+
+	for i := range cfg.Defaults.Folder.Devices {
+		if cfg.Defaults.Folder.Devices[i].DeviceID == from {
+			cfg.Defaults.Folder.Devices[i].DeviceID = to
+		}
+		if cfg.Defaults.Folder.Devices[i].IntroducedBy == from {
+			cfg.Defaults.Folder.Devices[i].IntroducedBy = to
+		}
+	}
+
+	for i := range cfg.IgnoredDevices {
+		if cfg.IgnoredDevices[i].ID == from {
+			cfg.IgnoredDevices[i].ID = to
+		}
+	}
 }
 
 func (u *cloudreveUploader) Summary(folder string) cloudreveUploadSummary {

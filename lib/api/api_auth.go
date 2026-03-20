@@ -352,7 +352,7 @@ func (m *basicAuthAndSessionMiddleware) cloudreveAuthCallbackHandler(w http.Resp
 		go m.model.ReportCloudreveDevice()
 	}
 
-	http.Redirect(w, r, "/", http.StatusFound)
+	http.Redirect(w, r, "/?cloudreveMountPrompt=1", http.StatusFound)
 }
 
 func (m *basicAuthAndSessionMiddleware) setCloudreveServer(server string) error {

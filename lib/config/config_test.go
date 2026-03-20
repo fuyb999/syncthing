@@ -100,7 +100,7 @@ func TestDefaultValues(t *testing.T) {
 			ConnectionPriorityQUICWAN: 40,
 			ConnectionPriorityRelay:   50,
 			Cloudreve: CloudreveConfiguration{
-				BaseURI:     "cloudreve://syncthing",
+				BaseURI:     "cloudreve://my",
 				WorkerCount: 2,
 			},
 		},
@@ -131,7 +131,7 @@ func TestDefaultValues(t *testing.T) {
 					MaxTotalSize:       4096,
 				},
 				Cloudreve: CloudreveConfiguration{
-					BaseURI:     "cloudreve://syncthing",
+					BaseURI:     "cloudreve://my",
 					WorkerCount: 2,
 				},
 			},
@@ -261,7 +261,7 @@ func TestDeviceConfig(t *testing.T) {
 					Entries:            []XattrFilterEntry{},
 				},
 				Cloudreve: CloudreveConfiguration{
-					BaseURI:     "cloudreve://syncthing",
+					BaseURI:     "cloudreve://my",
 					WorkerCount: 2,
 				},
 			},
@@ -365,7 +365,7 @@ func TestOverriddenValues(t *testing.T) {
 		ConnectionPriorityQUICWAN: 55,
 		ConnectionPriorityRelay:   9000,
 		Cloudreve: CloudreveConfiguration{
-			BaseURI:     "cloudreve://syncthing",
+			BaseURI:     "cloudreve://my",
 			WorkerCount: 2,
 		},
 	}
@@ -421,7 +421,7 @@ func TestMigrateLegacyCloudreveToOptions(t *testing.T) {
 	if !cfg.Options.Cloudreve.Enabled {
 		t.Fatal("expected migrated cloudreve config to be enabled")
 	}
-	if cfg.Options.Cloudreve.BaseURI != "cloudreve://syncthing" {
+	if cfg.Options.Cloudreve.BaseURI != "cloudreve://my" {
 		t.Fatalf("unexpected migrated base uri: %q", cfg.Options.Cloudreve.BaseURI)
 	}
 	if cfg.Options.Cloudreve.WorkerCount != 2 {

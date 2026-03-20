@@ -327,6 +327,8 @@ func TestCloudreveAuthCallbackHandler(t *testing.T) {
 				body = `{"access_token":"access-token","token_type":"Bearer","expires_in":3600,"refresh_token_expires_in":7200,"refresh_token":"refresh-token","scope":"openid profile offline_access Files.Read Files.Write"}`
 			case "/api/v4/session/oauth/userinfo":
 				body = `{"sub":"user-1","preferred_username":"cloudreve-user","email":"user@example.com"}`
+			case "/api/v4/user/me":
+				body = `{"code":0,"data":{"email":"user@example.com","nickname":"cloudreve-user","group":{"name":"admin"}}}`
 			default:
 				t.Fatalf("unexpected oauth request path: %s", req.URL.Path)
 			}
@@ -350,7 +352,7 @@ func TestCloudreveAuthCallbackHandler(t *testing.T) {
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("unexpected status: %d", resp.StatusCode)
 	}
-	if location := resp.Header.Get("Location"); location != "/" {
+	if location := resp.Header.Get("Location"); location != "/?cloudreveMountPrompt=1" {
 		t.Fatalf("unexpected redirect target: %s", location)
 	}
 
@@ -379,6 +381,9 @@ func TestCloudreveAuthCallbackHandler(t *testing.T) {
 	if !ok || session.AccessToken != "access-token" || session.RefreshToken != "refresh-token" {
 		t.Fatalf("unexpected stored oauth session: %#v", session)
 	}
+	if session.UserGroup != "admin" || !session.CanAccessPublic {
+		t.Fatalf("unexpected stored oauth access: %#v", session)
+	}
 	if got := wrapped.Options().ReleasesURL; got != "https://cloudreve.example.com/api/v4/site/syncthing/releases/meta.json" {
 		t.Fatalf("unexpected releasesURL after oauth login: %q", got)
 	}
@@ -398,6 +403,8 @@ func TestCloudreveAuthCallbackHandlerCreatesSessionWithoutGUIAuth(t *testing.T) 
 				body = `{"access_token":"access-token","token_type":"Bearer","expires_in":3600,"refresh_token_expires_in":7200,"refresh_token":"refresh-token","scope":"openid profile offline_access Files.Write"}`
 			case "/api/v4/session/oauth/userinfo":
 				body = `{"sub":"user-1","preferred_username":"cloudreve-user","email":"user@example.com"}`
+			case "/api/v4/user/me":
+				body = `{"code":0,"data":{"email":"user@example.com","nickname":"cloudreve-user","group":{"name":"user"}}}`
 			default:
 				t.Fatalf("unexpected oauth request path: %s", req.URL.Path)
 			}

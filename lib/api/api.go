@@ -275,17 +275,19 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodGet, "/rest/svc/report", s.getReport)                      // -
 	restMux.HandlerFunc(http.MethodGet, "/rest/svc/random/string", s.getRandomString)         // [length]
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/browse", s.getSystemBrowse)             // current
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/connections", s.getSystemConnections)   // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/discovery", s.getSystemDiscovery)       // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/error", s.getSystemError)               // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/paths", s.getSystemPaths)               // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/ping", s.restPing)                      // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/status", s.getSystemStatus)             // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/upgrade", s.getSystemUpgrade)           // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/version", s.getSystemVersion)           // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/loglevels", s.getSystemDebug)           // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/log", s.getSystemLog)                   // [since]
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/log.txt", s.getSystemLogTxt)            // [since]
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/cloudreve/profile", s.getSystemCloudreveProfile)
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/cloudreve/browse", s.getSystemCloudreveBrowse) // uri
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/connections", s.getSystemConnections)          // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/discovery", s.getSystemDiscovery)              // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/error", s.getSystemError)                      // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/paths", s.getSystemPaths)                      // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/ping", s.restPing)                             // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/status", s.getSystemStatus)                    // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/upgrade", s.getSystemUpgrade)                  // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/version", s.getSystemVersion)                  // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/loglevels", s.getSystemDebug)                  // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/log", s.getSystemLog)                          // [since]
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/log.txt", s.getSystemLogTxt)                   // [since]
 
 	// The POST handlers
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/prio", s.postDBPrio)                          // folder file
@@ -1687,6 +1689,114 @@ func (*service) getSystemBrowse(w http.ResponseWriter, r *http.Request) {
 	fsType.UnmarshalText([]byte(qs.Get("filesystem")))
 
 	sendJSON(w, browse(fsType.ToFS(), current))
+}
+
+type cloudreveBrowseResponse struct {
+	Current     string                     `json:"current"`
+	Parent      *cloudreve.DirectoryEntry  `json:"parent,omitempty"`
+	Directories []cloudreve.DirectoryEntry `json:"directories"`
+}
+
+type cloudreveProfileResponse struct {
+	Configured      bool   `json:"configured"`
+	Authenticated   bool   `json:"authenticated"`
+	Server          string `json:"server,omitempty"`
+	UserName        string `json:"userName,omitempty"`
+	UserEmail       string `json:"userEmail,omitempty"`
+	UserGroup       string `json:"userGroup,omitempty"`
+	CanAccessPublic bool   `json:"canAccessPublic"`
+}
+
+func (s *service) getSystemCloudreveProfile(w http.ResponseWriter, r *http.Request) {
+	cfg := s.cfg.Options().Cloudreve.Normalized()
+	resp := cloudreveProfileResponse{
+		Configured: strings.TrimSpace(cfg.Server) != "",
+		Server:     strings.TrimSpace(cfg.Server),
+	}
+	if !resp.Configured {
+		sendJSON(w, resp)
+		return
+	}
+
+	token, err := s.cloudreveAccessToken(r.Context())
+	if err != nil {
+		sendJSON(w, resp)
+		return
+	}
+
+	user, err := cloudreve.NewClient(cfg.Server, token, nil).CurrentUser(r.Context())
+	if err != nil {
+		sendJSON(w, resp)
+		return
+	}
+
+	resp.Authenticated = true
+	resp.UserName = strings.TrimSpace(user.Nickname)
+	resp.UserEmail = strings.TrimSpace(user.Email)
+	resp.UserGroup = user.GroupName()
+	resp.CanAccessPublic = user.CanAccessPublic()
+	sendJSON(w, resp)
+}
+
+func (s *service) getSystemCloudreveBrowse(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+	current := strings.TrimSpace(qs.Get("uri"))
+	if current == "" {
+		http.Error(w, "missing cloudreve browse uri", http.StatusBadRequest)
+		return
+	}
+
+	cfg := s.cfg.Options().Cloudreve.Normalized()
+	if strings.TrimSpace(cfg.Server) == "" {
+		http.Error(w, "cloudreve server is not configured", http.StatusBadRequest)
+		return
+	}
+
+	token, err := s.cloudreveAccessToken(r.Context())
+	if err != nil {
+		http.Error(w, fmt.Sprintf("cloudreve credentials unavailable: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	client := cloudreve.NewClient(cfg.Server, token, nil)
+	if isCloudrevePublicURI(current) {
+		user, err := client.CurrentUser(r.Context())
+		if err != nil {
+			http.Error(w, fmt.Sprintf("cloudreve profile unavailable: %v", err), http.StatusBadGateway)
+			return
+		}
+		if !user.CanAccessPublic() {
+			http.Error(w, "cloudreve public files require admin group", http.StatusForbidden)
+			return
+		}
+	}
+
+	listing, err := client.ListDirectories(r.Context(), current)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	sendJSON(w, cloudreveBrowseResponse{
+		Current:     current,
+		Parent:      listing.Parent,
+		Directories: listing.Directories,
+	})
+}
+
+func isCloudrevePublicURI(uri string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(uri)), "cloudreve://public")
+}
+
+func (s *service) cloudreveAccessToken(ctx context.Context) (string, error) {
+	cfg := s.cfg.Options().Cloudreve.Normalized()
+	if s.miscDB != nil {
+		return cloudreve.NewOAuthManager(s.cfg, s.miscDB, nil).AccessToken(ctx)
+	}
+	if token := strings.TrimSpace(cfg.Token); token != "" {
+		return token, nil
+	}
+	return "", errors.New("no cloudreve token configured")
 }
 
 func browse(fsType fs.FilesystemType, current string) []string {

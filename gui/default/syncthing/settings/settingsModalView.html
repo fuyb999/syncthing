@@ -171,11 +171,39 @@
           </div>
 
           <div class="row">
+            <div class="col-md-4">
+              <div class="form-group">
+                <label translate for="CloudreveMountRoot">Cloudreve Storage Space</label>
+                <select id="CloudreveMountRoot" class="form-control" ng-model="cloudreveMount.root">
+                  <option value="cloudreve://my" translate>Personal Files</option>
+                  <option value="cloudreve://public" ng-if="cloudreveCanAccessPublic()" translate>Public Files</option>
+                </select>
+                <p class="help-block" translate>Choose whether uploads go to your personal Cloudreve files or the public file space.</p>
+              </div>
+            </div>
+            <div class="col-md-8">
+              <div class="form-group">
+                <label translate for="CloudreveMountPath">Cloudreve Subpath</label>
+                <div class="input-group">
+                  <input id="CloudreveMountPath" class="form-control" type="text" ng-model="cloudreveMount.path" placeholder="syncthing/uploads" />
+                  <span class="input-group-btn">
+                    <button type="button" class="btn btn-default btn-secondary" ng-click="openCloudreveDirectoryPicker()" ng-disabled="!tmpOptions.cloudreve.server">
+                      <span class="fas fa-folder-open"></span>&nbsp;<span translate>Browse</span>
+                    </button>
+                  </span>
+                </div>
+                <p class="help-block" translate>Enter a relative path after the selected Cloudreve root, or browse existing directories in Cloudreve.</p>
+                <p class="help-block" translate>Browsing requires a configured Cloudreve server plus either a token or an authorized OAuth session with Files.Read scope.</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="row">
             <div class="col-md-6">
               <div class="form-group">
-                <label translate for="CloudreveBaseURI">Cloudreve Base URI</label>
-                <input id="CloudreveBaseURI" class="form-control" type="text" ng-model="tmpOptions.cloudreve.baseURI" placeholder="cloudreve://syncthing" />
-                <p class="help-block" translate>Remote directory prefix where files will be uploaded.</p>
+                <label translate for="CloudreveBaseURIPreview">Cloudreve Upload Mount</label>
+                <input id="CloudreveBaseURIPreview" class="form-control" type="text" ng-value="cloudreveMount.preview" readonly />
+                <p class="help-block" translate>Syncthing writes this combined mount URI into the configuration and uses it as the upload destination root.</p>
               </div>
             </div>
             <div class="col-md-6">
@@ -439,4 +467,83 @@
     </button>
   </div>
 
+</modal>
+
+<modal id="cloudreveBrowse" status="default" icon="fas fa-folder-open" heading="{{'Browse Cloudreve Directory' | translate}}" large="yes" closeable="yes">
+  <div class="modal-body">
+    <p class="alert alert-info" ng-if="cloudreveBrowse.promptMode" translate>Cloudreve login succeeded. Choose the upload bind directory now; Syncthing will save it automatically, and you can change it later in Settings.</p>
+
+    <div class="row">
+      <div class="col-md-4">
+        <div class="form-group">
+          <label translate for="CloudreveBrowseRoot">Cloudreve Storage Space</label>
+          <select id="CloudreveBrowseRoot" class="form-control" ng-model="cloudreveMount.root" ng-change="changeCloudreveBrowseRoot()" ng-disabled="cloudreveBrowse.loading || cloudreveBrowse.saving">
+            <option value="cloudreve://my" translate>Personal Files</option>
+            <option value="cloudreve://public" ng-if="cloudreveCanAccessPublic()" translate>Public Files</option>
+          </select>
+        </div>
+      </div>
+      <div class="col-md-8">
+        <div class="form-group">
+          <label translate for="CloudreveBrowseCurrent">Current Cloudreve Directory</label>
+          <input id="CloudreveBrowseCurrent" class="form-control" type="text" ng-value="cloudreveBrowse.current || cloudreveMount.preview" readonly />
+          <p class="help-block" translate>Only directories are shown here. Click a directory name to open it, or use the current directory as the upload mount path.</p>
+        </div>
+      </div>
+    </div>
+
+    <p class="text-danger" ng-if="cloudreveBrowse.error">{{cloudreveBrowse.error}}</p>
+
+    <p>
+      <button type="button" class="btn btn-default btn-secondary btn-sm" ng-click="loadCloudreveDirectory(cloudreveBrowse.parent.path)" ng-disabled="cloudreveBrowse.loading || cloudreveBrowse.saving || !cloudreveBrowse.parent || !cloudreveBrowse.parent.path">
+        <span class="fas fa-level-up-alt"></span>&nbsp;<span translate>Up One Level</span>
+      </button>
+      <button type="button" class="btn btn-default btn-secondary btn-sm" ng-click="loadCloudreveDirectory(cloudreveBrowse.current || cloudreveMount.preview)" ng-disabled="cloudreveBrowse.loading || cloudreveBrowse.saving">
+        <span class="fas fa-redo"></span>&nbsp;<span translate>Refresh</span>
+      </button>
+    </p>
+
+    <div class="table-responsive">
+      <table class="table table-striped table-hover">
+        <thead>
+          <tr>
+            <th translate>Directory</th>
+            <th class="text-right" translate>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr ng-if="cloudreveBrowse.loading">
+            <td colspan="2" translate>Loading directories...</td>
+          </tr>
+          <tr ng-if="cloudreveBrowse.saving">
+            <td colspan="2" translate>Saving Cloudreve mount...</td>
+          </tr>
+          <tr ng-if="!cloudreveBrowse.loading && !cloudreveBrowse.saving && cloudreveBrowse.directories.length === 0">
+            <td colspan="2" translate>No subdirectories found.</td>
+          </tr>
+          <tr ng-repeat="directory in cloudreveBrowse.directories track by directory.path">
+            <td>
+              <button type="button" class="btn btn-link btn-sm" ng-click="loadCloudreveDirectory(directory.path)" ng-disabled="cloudreveBrowse.saving">
+                <span class="fas fa-folder"></span>&nbsp;{{directory.name}}
+              </button>
+            </td>
+            <td class="text-right">
+              <button type="button" class="btn btn-default btn-secondary btn-sm" ng-click="selectCloudreveDirectory(directory.path)" ng-disabled="cloudreveBrowse.saving">
+                <span class="fas fa-check"></span>&nbsp;<span translate>Use</span>
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="modal-footer">
+    <button type="button" class="btn btn-primary btn-sm" ng-click="selectCurrentCloudreveDirectory()" ng-disabled="cloudreveBrowse.loading || cloudreveBrowse.saving">
+      <span class="fas fa-check"></span>&nbsp;<span translate>Use Current Directory</span>
+    </button>
+    <button type="button" class="btn btn-default btn-sm" data-dismiss="modal" ng-disabled="cloudreveBrowse.saving">
+      <span class="fas fa-times"></span>&nbsp;<span translate>Close</span>
+    </button>
+  </div>
 </modal>

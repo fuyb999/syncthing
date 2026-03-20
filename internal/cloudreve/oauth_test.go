@@ -9,6 +9,7 @@ package cloudreve
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/syncthing/syncthing/internal/db"
 	"github.com/syncthing/syncthing/internal/db/sqlite"
@@ -19,7 +20,7 @@ import (
 
 func TestOAuthScopesDefaultsToDesktopCompatibleScopes(t *testing.T) {
 	scopes := oauthScopes(config.CloudreveConfiguration{})
-	expected := "profile email openid offline_access UserInfo.Write Workflow.Write Files.Write Shares.Write"
+	expected := "profile email openid offline_access UserInfo.Read UserInfo.Write Workflow.Write Files.Read Files.Write Shares.Write"
 	if scopes != expected {
 		t.Fatalf("unexpected default scopes: %q != %q", scopes, expected)
 	}
@@ -30,7 +31,7 @@ func TestOAuthScopesAlwaysIncludesRequiredScopes(t *testing.T) {
 		OAuthScopes: "profile email",
 	})
 
-	for _, required := range []string{"openid", "offline_access", "Files.Write"} {
+	for _, required := range []string{"openid", "offline_access", "UserInfo.Read", "Files.Read", "Files.Write"} {
 		if !strings.Contains(scopes, required) {
 			t.Fatalf("expected required scope %q in %q", required, scopes)
 		}
@@ -62,5 +63,47 @@ func TestOAuthStatusAvailableWithoutUploadSyncEnabled(t *testing.T) {
 	}
 	if status.Server != "https://cloudreve.example.com" {
 		t.Fatalf("unexpected server: %q", status.Server)
+	}
+}
+
+func TestOAuthStatusIncludesCurrentUserAccess(t *testing.T) {
+	mdb, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		mdb.Close()
+	})
+
+	manager := NewOAuthManager(config.Wrap("/dev/null", config.Configuration{
+		Options: config.OptionsConfiguration{
+			Cloudreve: config.CloudreveConfiguration{
+				Server:            "https://cloudreve.example.com",
+				OAuthClientID:     "client-id",
+				OAuthClientSecret: "client-secret",
+			},
+		},
+	}, protocol.LocalDeviceID, events.NoopLogger), db.NewMiscDB(mdb), nil)
+
+	if err := manager.SaveSession(OAuthSession{
+		RefreshToken:    "refresh-token",
+		RefreshExpires:  time.Now().Add(time.Hour),
+		UserName:        "admin",
+		UserEmail:       "admin@example.com",
+		UserGroup:       "admin",
+		CanAccessPublic: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	status := manager.Status()
+	if !status.Authorized {
+		t.Fatal("expected oauth status to be authorized")
+	}
+	if status.UserGroup != "admin" {
+		t.Fatalf("unexpected user group: %q", status.UserGroup)
+	}
+	if !status.CanAccessPublic {
+		t.Fatal("expected admin user to access public files")
 	}
 }

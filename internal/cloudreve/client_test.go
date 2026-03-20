@@ -87,6 +87,215 @@ func TestJoinURI(t *testing.T) {
 	}
 }
 
+func TestListDirectories(t *testing.T) {
+	t.Parallel()
+
+	var requests []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v4/file" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if got := r.URL.Query().Get("uri"); got != "cloudreve://my/test" {
+			t.Fatalf("unexpected browse uri: %q", got)
+		}
+		if got := r.URL.Query().Get("page_size"); got != "1000" {
+			t.Fatalf("unexpected page size: %q", got)
+		}
+
+		requests = append(requests, r.URL.RawQuery)
+		switch r.URL.Query().Get("next_page_token") {
+		case "":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"files": []map[string]any{
+						{"type": 1, "name": "beta", "path": "cloudreve://my/test/beta"},
+						{"type": 0, "name": "note.txt", "path": "cloudreve://my/test/note.txt"},
+						{"type": 1, "name": "alpha", "path": "cloudreve://my/test/alpha"},
+					},
+					"parent": map[string]any{
+						"type": 1,
+						"name": "my",
+						"path": "cloudreve://my",
+					},
+					"pagination": map[string]any{
+						"next_token": "page-2",
+					},
+				},
+			})
+		case "page-2":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"files": []map[string]any{
+						{"type": 1, "name": "gamma", "path": "cloudreve://my/test/gamma"},
+						{"type": 1, "name": "beta", "path": "cloudreve://my/test/beta"},
+					},
+					"pagination": map[string]any{},
+				},
+			})
+		default:
+			t.Fatalf("unexpected next page token: %q", r.URL.Query().Get("next_page_token"))
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "token", srv.Client())
+	listing, err := client.ListDirectories(context.Background(), "cloudreve://my/test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(requests))
+	}
+	if listing.Parent == nil || listing.Parent.Path != "cloudreve://my" {
+		t.Fatalf("unexpected parent: %#v", listing.Parent)
+	}
+	if len(listing.Directories) != 3 {
+		t.Fatalf("unexpected directories: %#v", listing.Directories)
+	}
+	gotNames := []string{
+		listing.Directories[0].Name,
+		listing.Directories[1].Name,
+		listing.Directories[2].Name,
+	}
+	expectedNames := []string{"alpha", "beta", "gamma"}
+	for i := range expectedNames {
+		if gotNames[i] != expectedNames[i] {
+			t.Fatalf("unexpected sorted directories: %#v", gotNames)
+		}
+	}
+}
+
+func TestCloudreveParentURI(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		uri      string
+		expected string
+	}{
+		{uri: "cloudreve://my", expected: ""},
+		{uri: "cloudreve://public", expected: ""},
+		{uri: "cloudreve://my/demo", expected: "cloudreve://my"},
+		{uri: "cloudreve://public/foo/bar", expected: "cloudreve://public/foo"},
+		{uri: "cloudreve://public/%E6%B5%8B%E8%AF%95/bar", expected: "cloudreve://public/%E6%B5%8B%E8%AF%95"},
+	}
+
+	for _, tc := range cases {
+		if got := cloudreveParentURI(tc.uri); got != tc.expected {
+			t.Fatalf("unexpected parent uri for %q: %q != %q", tc.uri, got, tc.expected)
+		}
+	}
+}
+
+func TestCurrentUser(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v4/user/me" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 0,
+			"data": map[string]any{
+				"email":    "admin@example.com",
+				"nickname": "Admin",
+				"group": map[string]any{
+					"name": "admin",
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	user, err := NewClient(srv.URL, "token", srv.Client()).CurrentUser(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.GroupName() != "admin" {
+		t.Fatalf("unexpected group: %q", user.GroupName())
+	}
+	if !user.CanAccessPublic() {
+		t.Fatal("expected admin to access public files")
+	}
+}
+
+func TestReportDeviceReturnsRestorePayload(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/api/v4/devices/syncthing/report" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if got := r.Header.Get(cloudreveClientIDHeader); got != "NEW-DEVICE" {
+			t.Fatalf("unexpected client id header: %q", got)
+		}
+
+		var req DeviceReportRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.DeviceID != "NEW-DEVICE" {
+			t.Fatalf("unexpected device id: %#v", req)
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 0,
+			"data": map[string]any{
+				"restore_config": map[string]any{
+					"version": 51,
+					"profile": "restored",
+				},
+				"restore_from_device_id": "OLD-DEVICE",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	resp, err := NewClient(srv.URL, "token", srv.Client()).ReportDevice(context.Background(), DeviceReportRequest{
+		DeviceID: "NEW-DEVICE",
+		ShortID:  "NEW123",
+		APIKey:   "api-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.RestoreFromDeviceID != "OLD-DEVICE" {
+		t.Fatalf("unexpected restore source: %#v", resp)
+	}
+	if got := resp.RestoreConfig["profile"]; got != "restored" {
+		t.Fatalf("unexpected restore payload: %#v", resp.RestoreConfig)
+	}
+}
+
+func TestDeviceRegistrationErrorHelpers(t *testing.T) {
+	t.Parallel()
+
+	if !IsDeviceRegistrationConflict(&apiError{code: cloudreveErrorSyncthingIPConflict, msg: "conflict"}) {
+		t.Fatal("expected ip conflict error to be recognized")
+	}
+	if IsDeviceRegistrationConflict(&apiError{code: cloudreveErrorObjectExisted, msg: "other"}) {
+		t.Fatal("did not expect unrelated error code to be treated as ip conflict")
+	}
+	if !IsDeviceNotRegistered(&apiError{code: cloudreveErrorSyncthingDeviceNotRegistered, msg: "missing"}) {
+		t.Fatal("expected not registered error to be recognized")
+	}
+	if IsDeviceNotRegistered(errors.New("plain error")) {
+		t.Fatal("did not expect generic errors to be treated as not registered")
+	}
+}
+
 func TestIsRetryableError(t *testing.T) {
 	t.Parallel()
 
@@ -417,7 +626,7 @@ func TestReportDevice(t *testing.T) {
 		}),
 	})
 
-	err := client.ReportDevice(context.Background(), DeviceReportRequest{
+	resp, err := client.ReportDevice(context.Background(), DeviceReportRequest{
 		DeviceID:      "DEVICE-ID",
 		ShortID:       "SHORTID",
 		APIKey:        "api-key",
@@ -428,6 +637,9 @@ func TestReportDevice(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(resp.RestoreConfig) != 0 || resp.RestoreFromDeviceID != "" {
+		t.Fatalf("expected empty restore payload, got %#v", resp)
 	}
 
 	if method != http.MethodPut {
