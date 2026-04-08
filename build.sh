@@ -21,6 +21,11 @@ case "${1:-default}" in
 		LOGGER_DISCARD=1 build bench
 		;;
 
+	package-windows)
+		shift
+		bash script/package-windows-zip.sh "$@"
+		;;
+
 	prerelease)
 		script authors
 		script copyrights

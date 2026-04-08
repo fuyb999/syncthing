@@ -80,6 +80,13 @@ a release or checking out git, you just need to run `go run build.go` and the
 binaries are created in `./bin`. There's [a guide][5] with more details on the
 build process.
 
+To package Windows zip archives from Ubuntu, install Go 1.25 or newer plus
+`zig`. The repo-local helper `bash build.sh package-windows` follows the same
+flow as CI, ensures `goversioninfo` is available, and builds zip packages for
+`syncthing`, `stdiscosrv`, and `strelaysrv` on `amd64`, `386`, and `arm64`.
+You can override architectures with
+`WINDOWS_ARCHES="amd64 arm64" bash build.sh package-windows syncthing`.
+
 ## Signed Releases
 
 Release binaries are GPG signed with the key available from
